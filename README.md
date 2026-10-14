@@ -132,7 +132,31 @@ Each skill runs the matching `tools/` scripts and writes an HTML report under `r
 
 ## 5. Example output
 
-Screenshots coming soon.
+> **These screenshots use synthetic demo data.** Every conversation in them was invented. The real tools and renderers ran unchanged, with the Studio and widget clients replaced by offline fakes. Production reports look the same but are never committed.
+
+### `chatbot-conversation-run`
+Each question gets its own thread. The expected behaviour and risk are shown on every card, and each bot turn shows its sources, tools, latency and `run_id`.
+![chatbot-conversation-run](docs/screenshots/chatbot-conversation-run.png)
+
+### `pull-prod-conversations`
+A read-only day of production traffic. It shows the refusal and handoff rate, the config at pull time, and an index of all conversations.
+![pull-prod-conversations](docs/screenshots/pull-prod-conversations.png)
+
+### `replay-prod-conversations`
+Production compared with testing. It shows the config fields that differ, similarity per conversation, and refusal↔answer flips.
+![replay-prod-conversations](docs/screenshots/replay-prod-conversations.png)
+
+### `abstention-audit`
+The share of conversations where the bot punted, with a breakdown and the list of knowledge-base gaps.
+![abstention-audit](docs/screenshots/abstention-audit.png)
+
+### `handoff-audit`
+Handoff volume, how many expired, time-to-first-human-reply and handoff duration.
+![handoff-audit](docs/screenshots/handoff-audit.png)
+
+### `test-chatbot-studio`
+A Studio Test-tab run with each answer's sources and its faithfulness and quality scores. Rendered from the skill's bundled `sample_results.json`.
+![test-chatbot-studio](docs/screenshots/test-chatbot-studio.png)
 
 ---
 
