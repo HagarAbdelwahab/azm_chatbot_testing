@@ -1,0 +1,15 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+reports/
+.playwright-mcp/
+.playwright-cli/
+
+# reverses PII redaction — never commit
+*_redaction_map.json
+data/tickets_prepared_*.csv
+
+# Real production transcripts — never commit
+data/prod_pulls/

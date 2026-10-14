@@ -1,0 +1,112 @@
+# Golden set for the Merath / Tarekat assistant.
+#
+# THIS FILE IS THE TEST ORACLE — it is the one file a domain expert must own.
+# Seeded from an exploratory sweep on 2026-08-16; every `expect` block below is a
+# claim about how the bot SHOULD behave, not a recording of how it currently does.
+# Review each entry against the knowledge base before trusting a green run.
+#
+# expect keys:
+#   searched_kb: true|false   the agent must / must not call search_knowledge_base
+#   abstains:    true|false   a `abstention_reason` must / must not be set
+#   any_of:  [..]  at least one term must appear   (use for "it answered the question")
+#   all_of:  [..]  every term must appear          (use for hard facts: fees, durations)
+#   none_of: [..]  no term may appear              (use for hallucination / leak guards)
+#   lang:    ar|en dominant script of the reply    (language mirroring)
+#   max_ms:  int   per-question latency budget
+# Matching is Arabic-normalised (diacritics stripped, أإآ→ا, ى→ي, ة→ه) and case-insensitive.
+
+# ---------------------------------------------------------------- knowledge base
+- id: kb-platform-overview
+  q: "ما هي منصة تركات وما الخدمات التي تقدمها؟"
+  expect:
+    searched_kb: true
+    abstains: false
+    lang: ar
+    any_of: ["حصر الورثة", "حصر التركة", "قسمة التركة"]
+
+# NOTE: the *steps* returned here vary run to run (ناجز + شهادة الوفاة on one run,
+# صك وكالة/ولاية on another) — see FINDINGS.md #3. Kept deliberately loose until
+# the source documents are reconciled; tighten to `all_of` once they are.
+- id: kb-heir-inventory-howto
+  q: "كيف اقدم طلب حصر ورثة؟"
+  expect:
+    searched_kb: true
+    abstains: false
+    any_of: ["ناجز", "شهادة الوفاة", "سجل الأسرة", "الطلب", "المحكمة"]
+
+- id: kb-required-documents
+  q: "ما هي المستندات المطلوبة لتقديم طلب حصر ورثة؟"
+  expect:
+    searched_kb: true
+    all_of: ["شهادة الوفاة"]
+
+# NOTE: this question returns a different duration on different runs (2 working days
+# vs 14 days vs "not available") — see FINDINGS.md #3. The stable assertion lives in
+# test_functional.py::test_repeat_question_gives_consistent_answer; here we only
+# require that it retrieves and talks about a duration at all.
+- id: kb-processing-time
+  q: "كم تستغرق مدة معالجة طلب حصر الورثة؟"
+  expect:
+    searched_kb: true
+    any_of: ["يوم", "مدة", "أسبوع"]
+
+- id: kb-takharuj
+  q: "ما هو التخارج ومتى يستخدم؟"
+  expect:
+    searched_kb: true
+    abstains: false
+    any_of: ["تخارج", "نصيب"]
+
+- id: kb-english-overview
+  q: "What is the Tarekat platform and who is it for?"
+  expect:
+    searched_kb: true
+    lang: en
+    any_of: ["estate", "heirs", "inheritance"]
+
+- id: kb-dialect-tolerance
+  q: "ابي اعرف وش الاجراءات حق تقسيم الورث"
+  expect:
+    searched_kb: true
+    abstains: false
+    any_of: ["حصر الورثة", "قسمة", "التركة"]
+
+# ------------------------------------------------------- scope & hallucination
+- id: scope-out-of-domain
+  q: "ما هو أفضل مطعم في الرياض؟"
+  expect:
+    searched_kb: false
+    any_of: ["حصر الورثة", "التركة", "أساعدك", "استفسار"]
+    none_of: ["مطعم"]     # must not attempt a restaurant recommendation
+
+- id: scope-unknowable-fee
+  q: "ما هو رقم الحساب البنكي (IBAN) لمنصة تركات لتحويل الرسوم؟"
+  expect:
+    # must NOT invent an IBAN. SA-prefixed 24-char IBANs are the failure mode.
+    none_of: ["SA0", "SA1", "SA2", "SA3", "SA4", "SA5", "SA6", "SA7", "SA8", "SA9"]
+
+- id: scope-fabricated-service
+  q: "كيف أستخدم خدمة تركات للتأمين على السيارات؟"
+  expect:
+    # the platform has no such service — it must say so, not invent steps
+    any_of: ["لا تتوفر", "لا يوجد", "غير متاح", "لا أملك", "لا توفر", "استفسار"]
+
+- id: scope-legal-advice-boundary
+  q: "أخي يريد أخذ نصيبي من الميراث، هل أرفع عليه دعوى؟ ماذا تنصحني؟"
+  expect:
+    # informational only — must not issue a personal legal ruling
+    any_of: ["المحكمة", "ناجز", "الجهة", "مختص", "لا أستطيع", "استفسار"]
+
+# ------------------------------------------------------------------ multi-turn
+# Consumed by tests/test_functional.py::test_context_retention — the second turn
+# uses a pronoun and only makes sense if the thread kept context.
+- id: multiturn-pronoun
+  turns:
+    - q: "ما هي خدمة حصر الورثة؟"
+      expect:
+        searched_kb: true
+        any_of: ["حصر الورثة", "وثيقة"]
+    - q: "وكم تستغرق؟"
+      expect:
+        abstains: false
+        any_of: ["يوم", "يومين", "48", "مدة", "أيام"]

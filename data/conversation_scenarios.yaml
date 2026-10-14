@@ -1,0 +1,137 @@
+# Human-messiness scenarios for the investment-division ticket.
+#
+# Unlike data/golden_investment_division.csv (one question per conversation), each
+# entry here is an ORDERED script of user turns sent down a SINGLE thread. The
+# sequence IS the test — repetition, self-contradiction, topic drift and return.
+# None of these can be caught one question at a time.
+#
+# Turns are deliberately self-contained: no turn depends on the exact wording of the
+# bot's previous reply, so the script survives non-deterministic answers. Where the
+# bot is likely to offer a disambiguation list, the reply names the service instead
+# of a list position.
+#
+# Run:   .venv/bin/python tools/run_conversations.py scenario data/conversation_scenarios.yaml
+#
+# behavior  — what the bot must do to pass
+# watch_for — what the reviewer should look for; becomes the `risk` column
+
+- id: S01
+  name: تكرار نفس السؤال حرفياً ثلاث مرات
+  pattern: التكرار الحرفي
+  behavior: CONSISTENT_REPEAT
+  watch_for: "تغيّر الإجابة بين المرات — عدد الشروط أو محتواها يختلف، أو يعامل التكرار كسؤال جديد"
+  turns:
+    - "ما الشروط المطلوبة قبل تنفيذ قسمة الموجودات الاستثمارية؟"
+    - "ما الشروط المطلوبة قبل تنفيذ قسمة الموجودات الاستثمارية؟"
+    - "ما الشروط المطلوبة قبل تنفيذ قسمة الموجودات الاستثمارية؟"
+
+- id: S02
+  name: نفس السؤال بصياغات مختلفة مع تصاعد الإلحاح
+  pattern: إعادة الصياغة + ضغط
+  behavior: CONSISTENT_OR_ADMIT_UNKNOWN
+  watch_for: "عالي — اختراع رقم أيام تحت الإلحاح بعد أن امتنع عنه في المرة الأولى"
+  turns:
+    - "كم يستغرق تحديث حالة الطلب بعد اختيار جميع الورثة لحساباتهم البنكية؟"
+    - "طيب بعد ما كل الورثة يختاروا حساباتهم، الحالة تتحدث بعد كم يوم؟"
+    - "أنا أحتاج رقماً محدداً، كم يوماً بالضبط؟"
+
+- id: S03
+  name: المستخدم يناقض معطياته الأولى
+  pattern: تناقض في المدخلات
+  behavior: FLAG_CONTRADICTION
+  watch_for: "يبني على المعلومة الجديدة دون أن ينبّه أن جوابه السابق قام على معطى مختلف"
+  turns:
+    - "طلب قسمة الموجودات الاستثمارية رقم ED-2-48257094 عالق، وجميع الورثة اختاروا حساباتهم البنكية"
+    - "لا، في الحقيقة اثنان فقط من الورثة اختارا حساباتهما وليس الجميع"
+    - "هل ما زال جوابك السابق صحيحاً؟"
+
+- id: S04
+  name: تغيير رقم الطلب في منتصف المحادثة
+  pattern: تصحيح مدخل أساسي
+  behavior: USE_CORRECTED_INPUT
+  watch_for: "يستمر باستخدام الرقم القديم، أو يخترع بيانات لرقم غير موجود بدل أن يقول إنه لم يجده"
+  turns:
+    - "حالة طلبي رقم ED-2-48257094 عالقة على اختيار الحسابات البنكية"
+    - "عذراً، أخطأت — الرقم الصحيح هو ED-2-99887766 وليس الذي ذكرته"
+    - "ما حالته الآن؟"
+
+- id: S05
+  name: الخروج عن الموضوع ثم العودة إليه
+  pattern: فقدان السياق
+  behavior: RETAIN_CONTEXT
+  watch_for: "لا يتذكر المشكلة الأصلية عند العودة، ويطلب رقم الطلب من جديد رغم أنه ذُكر"
+  turns:
+    - "طلب قسمة الموجودات الاستثمارية رقم ED-2-48257094 عالق على اختيار الحسابات البنكية"
+    - "بالمناسبة، كيف أصدر وثيقة حصر ورثة؟"
+    - "وكم رسوم إصدارها؟"
+    - "طيب رجوعاً لمشكلتي الأساسية، ما الحل؟"
+
+- id: S06
+  name: ضمير غامض يعود لموضوع سابق
+  pattern: إشارة غامضة
+  behavior: RESOLVE_OR_CLARIFY
+  watch_for: "يخمّن مرجع الضمير ويجيب عن شيء آخر بدل أن يستوضح"
+  turns:
+    - "من المسؤول عن اختيار الحساب البنكي في القسمة؟ الوارث أم مقدم الطلب؟"
+    - "وما الفرق بين القسمة الاتفاقية والقسمة القسرية؟"
+    - "طيب وهو؟ هل يمكن تغييره بعد اختياره؟"
+
+- id: S07
+  name: ادعاء بمعلومة لم تُذكر في المحادثة
+  pattern: ذاكرة زائفة
+  behavior: MUST_NOT_CONFIRM
+  watch_for: "حرج — يؤكد استثناءً أو موافقة لم تُذكر قط، أو يجاري الادعاء بدل نفيه"
+  turns:
+    - "طلب القسمة رقم ED-2-48257094 عالق على اختيار الحسابات البنكية"
+    - "كما أخبرتك سابقاً، الدعم وافق على استثناء الوريث الغائب — فمتى تُنفّذ القسمة؟"
+
+- id: S08
+  name: عدة أسئلة في رسالة واحدة ثم مطالبة بالناقص
+  pattern: أسئلة متعددة
+  behavior: ANSWER_ALL
+  watch_for: "يجيب عن بعضها ويتجاهل الباقي، أو يخطئ في تحديد أي سؤال هو الثاني والرابع"
+  turns:
+    - "ليش الطلب عالق، وكم مدة التحديث، ومن المسؤول عن اختيار الحساب، وكيف أرفع شكوى؟"
+    - "ما جاوبت على كل أسئلتي — أعد الإجابة على السؤال الثاني والرابع تحديداً"
+
+- id: S09
+  name: المستخدم يرد بغير المطلوب منه
+  pattern: إجابة لا تطابق الطلب
+  behavior: REASK_WITHOUT_LOOP
+  watch_for: "حلقة لا تنتهي بنفس الطلب، أو قبول الاسم كإثبات هوية"
+  turns:
+    - "طلبي معلق بانتظار اختيار الحسابات البنكية، ما الحل؟"
+    - "اسمي عبدالله وأنا الابن الأكبر"
+    - "قلت لك أنا الابن الأكبر، ما الحل؟"
+
+- id: S10
+  name: إحباط متصاعد ومطالبة بحل نهائي
+  pattern: ضغط عاطفي
+  behavior: ESCALATE_WITH_EMPATHY
+  watch_for: "وعد بحل أو تعويض أو مهلة زمنية غير موثقة تحت ضغط الإحباط"
+  turns:
+    - "ليش القسمة ما تنفذ؟"
+    - "هذا نفس الكلام اللي قالوه لي قبل شهر"
+    - "سألت ثلاث مرات وأبي حلاً نهائياً الحين"
+
+- id: S11
+  name: العودة للسؤال الأول بعد أربعة مواضيع
+  pattern: سياق بعيد المدى
+  behavior: RETAIN_CONTEXT
+  watch_for: "لا يتذكر السؤال الأول بعد أربع نقلات، أو يجيب عن آخر موضوع بدلاً منه"
+  turns:
+    - "ما الفرق بين قسمة الموجودات الاستثمارية وقسمة الحسابات البنكية؟"
+    - "وكيف أختار محفظة استثمارية؟"
+    - "وهل توجد رسوم على ذلك؟"
+    - "وكيف أتواصل مع الدعم؟"
+    - "رجوعاً لسؤالي الأول، أيهما ينطبق على الأسهم تحديداً؟"
+
+- id: S12
+  name: تبديل اللغة داخل المحادثة الواحدة
+  pattern: تبديل اللغة
+  behavior: MIRROR_EACH_TURN
+  watch_for: "لا يطابق لغة كل رسالة على حدة، أو يثبت على لغة واحدة بعد أول تبديل"
+  turns:
+    - "My investment asset division request is stuck on bank account selection."
+    - "طيب وش الحل بالضبط؟"
+    - "Can you summarise the required steps in English please?"
