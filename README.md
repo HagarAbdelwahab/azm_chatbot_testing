@@ -21,7 +21,7 @@ Create a `.env` file in the repo root. It is gitignored, so never commit it.
 |---|---|---|
 | `AGENT_API`, `AGENT_API_KEY`, `AGENT_ORIGIN` | tests, conversation runs, replay | Widget API (publishable key, one tenant) |
 | `STUDIO_URL`, `STUDIO_EMAIL`, `STUDIO_PASSWORD` | prod pull, replay, audits, Studio tests | Admin API (JWT, cross-tenant read) |
-| `ANTHROPIC_API_KEY` | `judge.py`, `-m tickets` | Semantic grading. Without it, the graded tests are skipped |
+| `ANTHROPIC_API_KEY` | `judge.py`, `-m tickets`, `run_conversations.py judge` | LLM judge. Without it, graded tests skip and `judge` grades nothing |
 | `JUDGE_MODEL` *(optional)* | `judge.py` | Override the judge model |
 
 Tenant aliases accepted by every `--tenant` flag: `restricted` (**production**), `testing`, `insaf`, `test`.
@@ -81,17 +81,40 @@ Add a case to `data/golden.yaml`:
 Column format: [`data/tickets_template.csv`](data/tickets_template.csv). Arabic headers are accepted.
 To check the judge's calibration, run `.venv/bin/python judge.py`.
 
-### 3.3 Conversation runs (transcripts for human review)
+### 3.3 Conversation runs (judged, then human-reviewed by exception)
 
 ```bash
 .venv/bin/python tools/run_conversations.py ask      data/golden_investment_division.csv
 .venv/bin/python tools/run_conversations.py scenario data/conversation_scenarios.yaml
 .venv/bin/python tools/run_conversations.py deepen   --target 4
 .venv/bin/python tools/run_conversations.py reply    replies.json      # {"Q03": "follow-up"}
+.venv/bin/python tools/run_conversations.py judge                      # LLM-grade every bot turn
 .venv/bin/python tools/run_conversations.py export
 .venv/bin/python tools/render_html.py                                  # → reports/conversations/report.html
 .venv/bin/python tools/run_conversations.py archive  --label my-run
 ```
+
+#### The judge: review only what it flags
+
+`judge` grades every bot turn with Claude Sonnet 5.5 (`judge.evaluate_turn`) and prints a **review queue**. You read the queue instead of every transcript.
+
+| Dimension | Compared against | Fails when |
+|---|---|---|
+| **accuracy** | the row's approved answer, from an `answer` / `approved_answer` / `الإجابة` column (turn 1 only) | it contradicts the answer, omits an essential fact, or deflects |
+| **faithfulness** | the chunks the bot retrieved for that turn | it makes an actionable claim (fee, deadline, document, ruling, action) that isn't in the retrieved text |
+| **retrieval** | the retrieved chunks | reported only (relevant / partial / irrelevant / none), so a knowledge-base gap is separated from a model error |
+| **behavior** | the row's `expected_behavior` and the earlier turns | wrong behaviour (e.g. didn't escalate), contradicts itself, claims an action it can't do, or loops |
+
+- **Verdict, derived in code:** any failure gives `fail` (critical / major / minor). If the judge is unsure, the turn gets `needs_review`. Otherwise it's `pass`.
+- **Where verdicts appear:** the report puts the queue on top and adds a Judge panel to every bot turn. `results.csv` gets `judge_*` columns.
+- **Resuming:** the run picks up where it left off. `--fresh` regrades everything, `--only Q03 Q07` grades only those rows, and `--model claude-opus-5-5` runs a release gate on the stronger model.
+- **Cost:** about one Sonnet call per bot turn.
+
+**Calibrate it before you trust it:**
+- `.venv/bin/python judge.py` checks the judge against known fixtures.
+- Have a reviewer fill `verdict` in `results.csv` for a sample, then run `run_conversations.py judge --agree reports/conversations/results.csv`.
+- Aim for at least 90% agreement before you drop full manual review.
+- After that, keep spot-checking a few `pass` turns per run.
 
 ### 3.4 Production analysis (read-only, admin API)
 

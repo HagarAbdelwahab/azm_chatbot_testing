@@ -5,7 +5,7 @@ Unlike tools/import_tickets.py (which needs an approved answer per row and grade
 pass/fail), this collects TRANSCRIPTS for human review. Rows carry an
 `expected_behavior` class, not an approved answer, so nothing is auto-graded here.
 
-Three modes, run in order:
+Four modes, run in order:
 
   1. ask     open one conversation per row and send the question
                 .venv/bin/python tools/run_conversations.py ask data/questions.csv
@@ -15,7 +15,11 @@ Three modes, run in order:
              replies.json is {"Q03": "نعم، رقم الطلب ED-2-48257094", ...}
              or {"Q03": ["first follow-up", "second follow-up"]} for several turns.
 
-  3. export  write the reviewable artefacts
+  3. judge   LLM-grade every bot turn (accuracy, faithfulness, retrieval, behaviour)
+             and print the review queue — a human reads only what it flags
+                .venv/bin/python tools/run_conversations.py judge
+
+  4. export  write the reviewable artefacts (judge verdicts included when present)
                 .venv/bin/python tools/run_conversations.py export
 
 State lives in reports/conversations/state.json and holds each conversation_id, so
@@ -24,6 +28,7 @@ skips rows already present unless you pass --fresh.
 """
 
 import argparse
+import collections
 import csv
 import datetime
 import json
@@ -102,10 +107,21 @@ def _turn_record(turn) -> list[dict]:
             "abstention_reason": turn.abstention_reason,
             "confirmation_request": turn.confirmation_request,
             "handoff_status": turn.handoff_status,
+            # The bot OFFERING a handoff (bool) — distinct from one that happened. Without
+            # it the judge fails ESCALATE turns where the bot did offer a human.
+            "handoff_offer": turn.handoff_offer,
+            # Set when the vendor streamed {"error": ...} instead of generating. The text
+            # is then empty because nothing was generated, not because the bot said nothing.
+            "error": turn.error,
             "pii_intercept_count": turn.pii_intercept_count,
             "total_ms": turn.total_ms,
             "content_frames": turn.content_frames,
             "unknown_keys": sorted(turn.unknown_keys),
+            # The platform grading itself — shown beside the judge's verdict as a
+            # cross-check, never trusted on its own.
+            "answer_quality_score": turn.answer_quality_score,
+            "retrieval_score": turn.retrieval_score,
+            "faithfulness_score": turn.faithfulness_score,
         },
     ]
 
@@ -121,6 +137,10 @@ COLUMN_ALIASES = {
     "category":          ("category", "length_band", "type", "نوع", "التصنيف"),
     "expected_behavior": ("expected_behavior", "behavior", "expected", "السلوك المتوقع"),
     "risk":              ("risk", "watch_for", "pii_present", "الخطر"),
+    # Optional. When present, `judge` also grades accuracy against it (turn 1 only —
+    # the approved answer answers the opening question, not later follow-ups).
+    "approved_answer":   ("approved_answer", "answer", "expected_answer", "approved",
+                          "الإجابة", "الجواب"),
 }
 
 
@@ -166,6 +186,8 @@ def read_csv(path: pathlib.Path) -> list[dict]:
             "expected_behavior": ((r[resolved["expected_behavior"]] or "").strip()
                                   if resolved["expected_behavior"] else "UNSPECIFIED"),
             "risk": (r[resolved["risk"]] or "").strip() if resolved["risk"] else "",
+            "approved_answer": ((r[resolved["approved_answer"]] or "").strip()
+                                if resolved["approved_answer"] else ""),
         })
 
     if not rows:
@@ -188,6 +210,7 @@ def ask_one(row: dict) -> tuple[str, dict]:
         "category": row.get("category", ""),
         "expected_behavior": row.get("expected_behavior", ""),
         "risk": row.get("risk", ""),
+        "approved_answer": row.get("approved_answer", ""),
         "conversation_id": turn.conversation_id,
         "transcript": _turn_record(turn),
     }
@@ -426,9 +449,13 @@ def cmd_export(args) -> None:
                     meta.append(f"abstention={entry['abstention_reason']}")
                 if entry["handoff_status"]:
                     meta.append(f"handoff={entry['handoff_status']}")
+                if entry.get("handoff_offer"):
+                    meta.append("handoff_offer")
                 if entry["pii_intercept_count"]:
                     meta.append(f"pii_intercepts={entry['pii_intercept_count']}")
-                if entry["text"].strip():
+                if entry.get("error"):
+                    body = f"_(generation failed: `{entry['error']}` — not judged)_"
+                elif entry["text"].strip():
                     body = entry["text"]
                 elif entry.get("confirmation_request"):
                     body = "_(no answer text — the bot raised the confirmation gate below)_"
@@ -452,11 +479,15 @@ def cmd_export(args) -> None:
     md_path.write_text("\n".join(md), encoding="utf-8")
 
     # CSV — the original sheet with `response` filled in, verdict left for the reviewer.
+    # When `judge` has run, its worst per-conversation verdict fills the judge_* columns;
+    # the human `verdict` column stays blank so `judge --agree` can compare the two.
+    judgments = current_judgments(state, load_judgments())
     csv_path = OUT / "results.csv"
     with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
         w.writerow(["id", "question", "category", "expected_behavior", "risk",
                     "turns", "tools_used", "abstention", "handoff",
+                    "judge_verdict", "judge_severity", "judge_failed_turns", "judge_reason",
                     "response", "verdict", "reviewer_notes"])
         for r in records:
             bot = [e for e in r["transcript"] if e["role"] == "bot"]
@@ -464,15 +495,185 @@ def cmd_export(args) -> None:
                 (f"— المستخدم: {e['text']}" if e["role"] == "user" else f"— البوت: {e['text']}")
                 for e in r["transcript"])
             tools = sorted({t for e in bot for t in e["tools"] if t})
+            mine = sorted(((int(k.split("/")[1]), j) for k, j in judgments.items()
+                           if k.split("/")[0] == r["id"]), key=lambda kv: kv[0])
+            flagged = [(n, j) for n, j in mine if j["verdict"] != "pass"]
+            worst = max(flagged, key=lambda nj: VERDICT_RANK[nj[1]["verdict"]],
+                        default=(None, None))[1]
             w.writerow([
                 r["id"], r["question"], r["category"], r["expected_behavior"], r["risk"],
                 len(bot), ", ".join(tools) or "—",
                 ", ".join(e["abstention_reason"] for e in bot if e["abstention_reason"]) or "—",
                 ", ".join(e["handoff_status"] for e in bot if e["handoff_status"]) or "—",
+                (worst or {}).get("verdict") or ("pass" if mine else ""),
+                (worst or {}).get("severity", ""),
+                ", ".join(str(n) for n, _ in flagged),
+                " | ".join(f"t{n}: {j['reason']}" for n, j in flagged),
                 convo, "", "",
             ])
 
     print(f"wrote {md_path.relative_to(ROOT)}\nwrote {csv_path.relative_to(ROOT)}")
+
+
+# ---------------------------------------------------------------- judge
+
+JUDGMENTS = OUT / "judgments.json"
+VERDICT_RANK = {"fail": 2, "needs_review": 1, "pass": 0}
+
+
+def load_judgments() -> dict:
+    if not JUDGMENTS.exists():
+        return {}
+    return json.loads(JUDGMENTS.read_text(encoding="utf-8"))
+
+
+def bot_turns(rec: dict) -> list[tuple[int, dict, dict, list[dict]]]:
+    """(bot-turn number, user entry, bot entry, history before this exchange)."""
+    out, history, last_user, n = [], [], None, 0
+    for e in rec["transcript"]:
+        if e["role"] == "user":
+            last_user = e
+            continue
+        n += 1
+        out.append((n, last_user or {"role": "user", "text": ""}, e, list(history)))
+        history += [last_user, e] if last_user else [e]
+        last_user = None
+    return out
+
+
+def current_judgments(state: dict, judgments: dict) -> dict:
+    """Drop judgments that no longer describe the transcript: the turn was re-asked
+    (`ask`/`scenario --fresh`) so its run_id changed, or the turn is gone. Otherwise a
+    report shows an old verdict next to a new answer."""
+    live = {f"{rid}/{n}": bot.get("run_id", "")
+            for rid, rec in state.items() for n, _, bot, _ in bot_turns(rec)}
+    return {k: j for k, j in judgments.items()
+            if k in live and j.get("run_id", "") == live[k]}
+
+
+def worst_verdict(rec_id: str, judgments: dict) -> str | None:
+    mine = [j["verdict"] for k, j in judgments.items() if k.split("/")[0] == rec_id]
+    return max(mine, key=VERDICT_RANK.get) if mine else None
+
+
+def cmd_judge(args) -> None:
+    sys.path.insert(0, str(ROOT))
+    import judge
+
+    if args.agree:
+        return judge_agreement(args.agree)
+
+    state = load_state()
+    if not state:
+        sys.exit(f"no {STATE.relative_to(ROOT)} — run `ask` or `scenario` first")
+    if not judge.HAVE_KEY:
+        sys.exit("ANTHROPIC_API_KEY is not set in .env — the judge needs it. Nothing was graded.")
+
+    judgments = {} if args.fresh else load_judgments()
+    todo, errored = [], []
+    for rid, rec in sorted(state.items()):
+        if args.only and rid not in args.only:
+            continue
+        for n, user, bot, history in bot_turns(rec):
+            key = f"{rid}/{n}"
+            if bot.get("error"):              # nothing was generated — nothing to grade
+                errored.append(key)
+                judgments.pop(key, None)
+                continue
+            # Same run_id = same answer already graded. A different one means the turn
+            # was re-asked since, so the stored verdict is about an answer that is gone.
+            if key in judgments and judgments[key].get("run_id") == bot.get("run_id", ""):
+                continue
+            todo.append((key, rec, n, user, bot, history))
+
+    if not todo:
+        print(f"every bot turn already judged in {JUDGMENTS.relative_to(ROOT)} — use --fresh to regrade")
+    else:
+        model = args.model or judge.JUDGE_MODEL
+        print(f"judging {len(todo)} bot turn(s) with {model}, {args.workers} worker(s)...")
+
+        def judge_one(item):
+            key, rec, n, user, bot, history = item
+            try:
+                j = judge.evaluate_turn(
+                    question=user["text"], answer=bot["text"], history=history,
+                    chunks=bot.get("sources") or [],
+                    approved=rec.get("approved_answer") if n == 1 else None,
+                    expected_behavior=rec.get("expected_behavior", ""),
+                    risk=rec.get("risk", ""), model=model,
+                    meta={"abstention_reason": bot.get("abstention_reason"),
+                          "handoff_status": bot.get("handoff_status"),
+                          "handoff_offer": bot.get("handoff_offer"),
+                          "confirmation_request": bot.get("confirmation_request"),
+                          "searched_kb": bot.get("searched_kb")})
+            except Exception as exc:          # one bad call must not lose the batch
+                print(f"  {key}: ERROR {type(exc).__name__}: {exc}", flush=True)
+                return
+            rec_j = j.to_dict() | {"run_id": bot.get("run_id", "")}
+            with _SAVE_LOCK:
+                judgments[key] = rec_j
+                OUT.mkdir(parents=True, exist_ok=True)
+                JUDGMENTS.write_text(json.dumps(judgments, ensure_ascii=False, indent=1),
+                                     encoding="utf-8")
+            sev = f" [{j.severity}]" if j.verdict == "fail" else ""
+            print(f"  {key}: {j.verdict}{sev}  acc={j.accuracy} faith={j.faithfulness} "
+                  f"retr={j.retrieval} beh={j.behavior}", flush=True)
+
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            list(pool.map(judge_one, todo))
+
+    # Summary over everything judged so far, not just this call — minus stale verdicts.
+    judgments = current_judgments(state, load_judgments())
+    counts = collections.Counter(j["verdict"] for j in judgments.values())
+    sev = collections.Counter(j["severity"] for j in judgments.values() if j["verdict"] == "fail")
+    print(f"\n{len(judgments)} turn(s) judged -> {JUDGMENTS.relative_to(ROOT)}")
+    print(f"  pass {counts['pass']} · fail {counts['fail']} "
+          f"(critical {sev['critical']}, major {sev['major']}, minor {sev['minor']}) · "
+          f"needs_review {counts['needs_review']}")
+    queue = sorted((k for k, j in judgments.items() if j["verdict"] != "pass"),
+                   key=lambda k: (-VERDICT_RANK[judgments[k]["verdict"]], k))
+    if queue:
+        print("review queue (open these, skip the rest):")
+        for k in queue:
+            j = judgments[k]
+            print(f"  {k:12} {j['verdict']:12} {j['severity']:8} {j['reason'][:110]}")
+    else:
+        print("review queue empty — every judged turn passed")
+    if errored:
+        print(f"skipped {len(errored)} errored turn(s) — generation failed, re-ask them: "
+              + ", ".join(errored))
+
+
+def judge_agreement(path: pathlib.Path) -> None:
+    """Judge vs human: compare the worst judge verdict per row to a reviewer's `verdict`
+    column (pass / fail, or ✓ / ✗, or نجح / فشل). Run this before trusting the judge to
+    replace manual review — and again whenever the judge prompt or model changes."""
+    judgments = current_judgments(load_state(), load_judgments())
+    if not judgments:
+        sys.exit(f"no current judgments in {JUDGMENTS.relative_to(ROOT)} — run `judge` first")
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    norm = {"pass": "pass", "ok": "pass", "✓": "pass", "نجح": "pass", "سليم": "pass",
+            "fail": "fail", "✗": "fail", "x": "fail", "فشل": "fail", "خطأ": "fail"}
+    pairs, disagree = 0, []
+    for r in rows:
+        human = norm.get((r.get("verdict") or "").strip().lower())
+        rid = (r.get("id") or "").strip()
+        machine = worst_verdict(rid, judgments)
+        if not human or not machine:
+            continue
+        pairs += 1
+        machine_pf = "pass" if machine == "pass" else "fail"   # needs_review counts as flagged
+        if machine_pf != human:
+            disagree.append((rid, human, machine))
+    if not pairs:
+        sys.exit(f"no row in {path} has both a human `verdict` and a judged id — "
+                 "fill the verdict column for a sample first")
+    agree = pairs - len(disagree)
+    print(f"agreement {agree}/{pairs} = {100 * agree / pairs:.0f}%  (target ≥ 90% before "
+          "reviewing only the flagged queue)")
+    for rid, human, machine in disagree:
+        print(f"  {rid:10} human={human:5} judge={machine}")
 
 
 # ---------------------------------------------------------------- cli
@@ -549,6 +750,15 @@ def main() -> None:
 
     e = sub.add_parser("export", help="write transcripts.md + results.csv")
     e.set_defaults(func=cmd_export)
+
+    j = sub.add_parser("judge", help="LLM-grade every bot turn; prints the review queue")
+    j.add_argument("--workers", type=int, default=4)
+    j.add_argument("--fresh", action="store_true", help="regrade turns already judged")
+    j.add_argument("--only", nargs="+", metavar="ID", help="judge only these conversation ids")
+    j.add_argument("--model", help="override JUDGE_MODEL, e.g. claude-opus-5-5 for a release gate")
+    j.add_argument("--agree", type=pathlib.Path, metavar="CSV",
+                   help="compare judge verdicts to a reviewer-filled `verdict` column instead")
+    j.set_defaults(func=cmd_judge)
 
     ar = sub.add_parser("archive", help="move the finished run into a date-time folder")
     ar.add_argument("--label", default="",

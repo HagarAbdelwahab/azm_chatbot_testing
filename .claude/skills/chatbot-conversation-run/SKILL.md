@@ -166,6 +166,39 @@ Egyptian question gets an Egyptian reply, English gets English.
 same confirmation gate re-issues (see <gotchas>) — chat cannot get past it.
 </review>
 
+<judge>
+## Step 2b — Let the judge grade every bot turn
+
+```bash
+.venv/bin/python tools/run_conversations.py judge      # → judgments.json + review queue
+```
+
+`judge.evaluate_turn` (Claude Sonnet 5.5, override with `--model` or `JUDGE_MODEL`)
+grades each bot turn on four dimensions and derives the verdict in code:
+
+| dimension | reference | fails when |
+|---|---|---|
+| accuracy | the row's `approved_answer` (turn 1 only; `n_a` without one) | contradicts / omits an essential fact / deflects |
+| faithfulness | the turn's retrieved chunks (`sources`) | an actionable claim is not in the retrieved text |
+| retrieval | the turn's retrieved chunks | reported only: relevant / partial / irrelevant / none |
+| behavior | the row's `expected_behavior` + earlier turns | wrong behaviour, self-contradiction, claimed action, loop |
+
+Verdict: any failed dimension → `fail` (critical / major / minor); judge unsure →
+`needs_review`; otherwise `pass`. **Read only the review queue it prints** — `fail`
+first, critical on top, then `needs_review`. Passing turns need no human read.
+
+- Needs `ANTHROPIC_API_KEY` in `.env`; without it the command exits and grades nothing.
+- Resumable: already-judged turns are skipped. Re-run after every reply round to grade
+  the new turns; `--fresh` regrades everything, `--only Q03 Q07` targets rows.
+- Cost is about one Sonnet call per bot turn.
+- To give it an accuracy reference, put an `answer` / `approved_answer` / `الإجابة`
+  column in the question CSV.
+- Before trusting it to replace manual review, have a reviewer fill `verdict` in
+  `results.csv` for a sample and run `judge --agree reports/conversations/results.csv`.
+  Aim for ≥ 90% agreement. `python judge.py` runs the calibration fixtures.
+- The judge is a triage filter, not ground truth: spot-check a few `pass` turns per run.
+</judge>
+
 <report>
 ## Step 3 — Export the reviewable artefacts
 
@@ -175,8 +208,12 @@ same confirmation gate re-issues (see <gotchas>) — chat cannot get past it.
 open reports/conversations/report.html
 ```
 
-Re-run BOTH after every reply round — they read `state.json`, so a stale export
-silently omits the newest turns.
+Re-run BOTH after every reply round and after `judge` — they read `state.json` and
+`judgments.json`, so a stale export silently omits the newest turns and verdicts.
+With judgments present the report opens with the review queue on top and adds
+`judge: review queue / fail / critical / needs review` filters plus a Judge panel per
+bot turn; `results.csv` gains `judge_verdict`, `judge_severity`, `judge_failed_turns`,
+`judge_reason`.
 
 **Archive the previous run before starting a new one** — `ask --fresh` overwrites
 `state.json`, and the old transcripts are not recoverable:
@@ -205,6 +242,7 @@ Outputs in `reports/conversations/`:
 - `transcripts.md` — same content, plain text, greppable
 - `results.csv` — the original sheet with `response` filled; `verdict` left blank
 - `state.json` — raw record with every `conversation_id` (needed to resume threads)
+- `judgments.json` — the judge's per-turn verdicts, keyed `<row-id>/<bot-turn>`
 - `replies_round*.json` — your side of the conversations
 </report>
 
@@ -288,9 +326,11 @@ honestly in the report rather than leaving them looking blank.
 ## Step 5 — Summarise for the human
 
 Report, in this order:
-1. Counts — conversations, total bot turns, how many reply rounds.
+1. Counts — conversations, total bot turns, how many reply rounds, and the judge's
+   pass / fail (critical, major, minor) / needs_review split.
 2. Where the files are, naming `report.html` as the one to open.
-3. Findings ranked by severity, each naming the row id and quoting the evidence.
+3. Findings ranked by severity, each naming the row id and quoting the evidence —
+   start from the judge's review queue, and say which items you confirmed by reading.
 4. Anything NOT captured or NOT testable, stated plainly.
 5. **The report URL, as the last line of every finalised run — always, unprompted.**
    A path the user has to assemble by hand is a path they do not open. Attach the

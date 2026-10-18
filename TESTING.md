@@ -196,13 +196,28 @@ still agrees with itself. The seed entries in `golden.yaml` were written this wa
 are marked for review — pull the 11 indexed documents from Studio → Knowledge Bases
 and check every `all_of` against them.
 
+## Judging conversation runs automatically
+
+Since 2026-09-01 the done frame carries `retrieved_chunks`, so the retrieved text is
+available per turn (it lands in `Turn.retrieved_contexts` → `sources` in state.json).
+`tools/run_conversations.py judge` uses it: `judge.evaluate_turn` grades every bot turn
+for **accuracy** (vs an approved answer, when the row has one), **faithfulness** (vs the
+retrieved chunks), **retrieval** relevance and **behaviour** (vs `expected_behavior` and
+the earlier turns), and prints a review queue. Humans read the queue, not every
+transcript. Setup, flags and calibration (`judge.py`, `judge --agree`) are in README §3.3.
+
+The same triage rule as above applies: the judge reads a non-deterministic bot, and is
+itself an LLM. A `fail` that does not reproduce on a serial re-run is finding #3, not a
+regression; and a judge config that drops below ~90% agreement with a reviewer on a
+sample is not fit to gate on.
+
 ## What this suite cannot measure yet
 
-RAG quality metrics — **faithfulness**, **context precision**, **context recall** —
-all require the retrieved chunks, and `sources` is always `[]` (FINDINGS.md #4).
-`Turn.retrieved_contexts` already maps 1:1 onto a ragas `SingleTurnSample`, so the day
-citations are returned you add ragas and the plumbing is done. Until then, answer-level
-assertions in the golden set are the ceiling.
+**Context recall** — whether retrieval found *everything* relevant — needs the full
+knowledge base as a reference, which this repo does not hold. The judge's `retrieval`
+dimension only says whether what *was* retrieved could answer the question.
+`Turn.retrieved_contexts` maps 1:1 onto a ragas `SingleTurnSample` if you later want
+ragas metrics alongside the judge.
 
 ## Widget testing (not yet automated)
 

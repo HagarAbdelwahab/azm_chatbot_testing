@@ -11,6 +11,9 @@ The page is built for one job: reading a conversation and judging it. User and b
 are on opposite sides with distinct colours, every bot turn carries its tool trace
 and run_id, and confirmation gates render as their own block with the arguments
 the agent invented. Filter by expected behaviour, or search across all turns.
+
+When `run_conversations.py judge` has run, every bot turn carries the judge's verdict
+and a Judge panel, and the page opens with the review queue (fail → needs_review) on top.
 """
 
 import collections
@@ -26,6 +29,8 @@ sys.path.insert(0, str(ROOT))
 OUT = ROOT / "reports" / "conversations"
 STATE = OUT / "state.json"
 PAGE = OUT / "report.html"
+JUDGMENTS = OUT / "judgments.json"
+VERDICT_RANK = {"fail": 2, "needs_review": 1, "pass": 0}
 
 ARABIC = re.compile(r"[؀-ۿ]")
 
@@ -99,7 +104,30 @@ def panels(entry: dict) -> str:
     return out
 
 
-def bubble(entry: dict, n: int) -> str:
+def judge_panel(j: dict, entry: dict) -> str:
+    """The judge's verdict for one bot turn, with the platform's self-scores beside it."""
+    dims = "".join(
+        f'<tr><td>{k}</td><td class="jd {html.escape(str(j.get(k)))}">{html.escape(str(j.get(k)))}</td></tr>'
+        for k in ("accuracy", "faithfulness", "retrieval", "behavior"))
+    lists = ""
+    for label, key in (("contradicts", "contradicted_facts"), ("missing", "missing_facts"),
+                       ("unsupported", "unsupported_claims")):
+        for item in j.get(key) or []:
+            lists += f'<li><b>{label}:</b> <span dir="auto">{html.escape(item)}</span></li>'
+    plat = [f"{lbl} {entry[k]:.2f}" for lbl, k in (("quality", "answer_quality_score"),
+            ("retrieval", "retrieval_score"), ("faithfulness", "faithfulness_score"))
+            if isinstance(entry.get(k), (int, float))]
+    plat_html = (f'<p class="note">platform self-scores: {" · ".join(plat)}</p>' if plat else "")
+    return (f'<details class="pan jp" {"open" if j["verdict"] != "pass" else ""}>'
+            f'<summary>Judge — {html.escape(j["verdict"])}'
+            f'{" · " + html.escape(j["severity"]) if j["verdict"] == "fail" else ""}</summary>'
+            f'<p class="jr" dir="auto">{html.escape(j.get("reason", ""))}</p>'
+            f'<table class="jt">{dims}</table>'
+            f'{f"<ul class=jl>{lists}</ul>" if lists else ""}{plat_html}'
+            f'<p class="note">{html.escape(j.get("model", ""))}</p></details>')
+
+
+def bubble(entry: dict, n: int, j: dict | None = None) -> str:
     """One turn. User right, bot left — the reading order Arabic chat expects."""
     if entry["role"] == "user":
         return (
@@ -110,7 +138,10 @@ def bubble(entry: dict, n: int) -> str:
 
     text = entry["text"]
     gate = entry.get("confirmation_request")
-    if text.strip():
+    if entry.get("error"):
+        body = (f'<p class="note warn">⚠ generation failed: <code>{html.escape(str(entry["error"]))}'
+                '</code> — nothing was generated, so this turn is not judged. Re-ask it.</p>')
+    elif text.strip():
         body = rich(text)
     elif gate:
         body = '<p class="note">لا يوجد نص — البوت طلب تأكيد الإجراء أدناه.<br>' \
@@ -135,8 +166,13 @@ def bubble(entry: dict, n: int) -> str:
             '</div>')
 
     body += panels(entry)
+    if j:
+        body += judge_panel(j, entry)
 
     chips = [f'<span class="chip ms">{entry["total_ms"]} ms</span>']
+    if j:
+        sev = f' · {j["severity"]}' if j["verdict"] == "fail" else ""
+        chips.insert(0, f'<span class="chip jv {j["verdict"]}">judge: {j["verdict"]}{sev}</span>')
     for t in entry["tools"]:
         cls = "chip tool" + (" write" if t == "send_iban_reminder" else "")
         chips.append(f'<span class="{cls}">{html.escape(t)}</span>')
@@ -146,6 +182,8 @@ def bubble(entry: dict, n: int) -> str:
         chips.append(f'<span class="chip abs">{html.escape(entry["abstention_reason"])}</span>')
     if entry["handoff_status"]:
         chips.append(f'<span class="chip abs">handoff: {html.escape(str(entry["handoff_status"]))}</span>')
+    if entry.get("handoff_offer"):
+        chips.append('<span class="chip abs">handoff offered</span>')
     if entry["pii_intercept_count"]:
         chips.append(f'<span class="chip warnchip">pii×{entry["pii_intercept_count"]}</span>')
     if entry["unknown_keys"]:
@@ -162,25 +200,39 @@ def bubble(entry: dict, n: int) -> str:
     )
 
 
-def card(r: dict) -> str:
+def worst(r: dict, judgments: dict) -> dict | None:
+    mine = [j for k, j in judgments.items() if k.split("/")[0] == r["id"]]
+    return max(mine, key=lambda j: (VERDICT_RANK[j["verdict"]],
+                                    j["severity"] == "critical")) if mine else None
+
+
+def card(r: dict, judgments: dict) -> str:
     turns = r["transcript"]
     nbot = sum(1 for e in turns if e["role"] == "bot")
     gated = any(e.get("confirmation_request") for e in turns if e["role"] == "bot")
     bubbles = []
-    n = 0
+    n = nb = 0
     for e in turns:
         if e["role"] == "user":
             n += 1
-        bubbles.append(bubble(e, n))
+        else:
+            nb += 1
+        bubbles.append(bubble(e, n, judgments.get(f'{r["id"]}/{nb}') if e["role"] == "bot" else None))
+    w = worst(r, judgments)
+    jv = w["verdict"] if w else "unjudged"
+    crit = bool(w) and w["verdict"] == "fail" and w["severity"] == "critical"
 
     beh = r["expected_behavior"]
     return (
         f'<section class="conv" id="{r["id"]}" data-beh="{html.escape(beh)}" '
-        f'data-turns="{nbot}" data-gate="{str(gated).lower()}">'
+        f'data-turns="{nbot}" data-gate="{str(gated).lower()}" '
+        f'data-judge="{jv}" data-crit="{str(crit).lower()}">'
         f'<header class="ch">'
         f'<div class="chl"><span class="cid">{r["id"]}</span>'
         f'<span class="cat" dir="rtl">{html.escape(r["category"])}</span></div>'
-        f'<div class="chr"><span class="beh">{html.escape(beh)}</span>'
+        f'<div class="chr">'
+        + (f'<span class="chip jv {jv}">judge: {jv}{" · critical" if crit else ""}</span>' if w else "")
+        + f'<span class="beh">{html.escape(beh)}</span>'
         f'<span class="cnt">{nbot} turn{"s" if nbot != 1 else ""}</span></div>'
         f'</header>'
         f'<div class="risk" dir="rtl"><b>الخطر المتوقع:</b> {html.escape(r["risk"])}</div>'
@@ -288,6 +340,18 @@ code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bot)
  padding:1px 5px;border-radius:4px}
 .hidden{display:none}
 #empty{color:var(--dim);text-align:center;padding:40px}
+.chip.jv.pass{color:#0a8a3f;border-color:#0a8a3f}
+.chip.jv.fail{color:#fff;background:var(--warn);border-color:var(--warn)}
+.chip.jv.needs_review{color:var(--gateln);border-color:var(--gateln)}
+.jp>summary{font-weight:600}
+.jr{margin:4px 11px 8px;font-size:13.5px}
+.jt{margin:0 11px 8px;border-collapse:collapse;font-size:12.5px;direction:ltr}
+.jt td{padding:3px 10px 3px 0}
+.jt td:first-child{color:var(--dim);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.jd.pass,.jd.relevant{color:#0a8a3f}.jd.fail,.jd.irrelevant{color:var(--warn);font-weight:700}
+.jd.partial,.jd.none,.jd.n_a{color:var(--dim)}
+.jl{font-size:13px}
+.jp .note{margin:0 11px 8px}
 """
 
 JS = """
@@ -298,7 +362,12 @@ function apply(){
   let shown=0;
   convs.forEach(c=>{
     const okB = beh==='all' || (beh==='gate'? c.dataset.gate==='true'
-              : beh==='multi'? +c.dataset.turns>1 : c.dataset.beh===beh);
+              : beh==='multi'? +c.dataset.turns>1
+              : beh==='j:flagged'? ['fail','needs_review'].includes(c.dataset.judge)
+              : beh==='j:fail'? c.dataset.judge==='fail'
+              : beh==='j:review'? c.dataset.judge==='needs_review'
+              : beh==='j:crit'? c.dataset.crit==='true'
+              : c.dataset.beh===beh);
     const okQ = !q || c.textContent.toLowerCase().includes(q);
     const ok = okB && okQ;
     c.classList.toggle('hidden',!ok); if(ok) shown++;
@@ -325,7 +394,23 @@ def main() -> None:
     if not STATE.exists():
         sys.exit(f"no {STATE.relative_to(ROOT)} — run `run_conversations.py ask` first")
     state = json.loads(STATE.read_text(encoding="utf-8"))
+    judgments = (json.loads(JUDGMENTS.read_text(encoding="utf-8"))
+                 if JUDGMENTS.exists() else {})
+    # Drop verdicts whose turn was re-asked since (run_id changed) or no longer exists —
+    # same rule as run_conversations.current_judgments, inlined so rendering stays
+    # offline (importing run_conversations pulls in agent_client, which needs a key).
+    live = {f'{r["id"]}/{n}': e.get("run_id", "") for r in state.values()
+            for n, e in enumerate((e for e in r["transcript"] if e["role"] == "bot"), 1)}
+    judgments = {k: j for k, j in judgments.items()
+                 if k in live and j.get("run_id", "") == live[k]}
     records = sorted(state.values(), key=lambda r: r["id"])
+    if judgments:
+        # The review queue first: failures (critical on top), then needs_review, then passes.
+        def queue_key(r):
+            w = worst(r, judgments)
+            return (-(VERDICT_RANK[w["verdict"]] if w else -1),
+                    not (w and w["severity"] == "critical"), r["id"])
+        records.sort(key=queue_key)
 
     behaviours = sorted({r["expected_behavior"] for r in records})
     n_bot = sum(1 for r in records for e in r["transcript"] if e["role"] == "bot")
@@ -344,6 +429,15 @@ def main() -> None:
     filters = ['<button class="f on" data-v="all">all ({})</button>'.format(len(records)),
                f'<button class="f" data-v="multi">multi-turn</button>',
                f'<button class="f" data-v="gate">confirmation gate ({n_gate})</button>']
+    if judgments:
+        wv = [worst(r, judgments) for r in records]
+        n_fail = sum(1 for w in wv if w and w["verdict"] == "fail")
+        n_rev = sum(1 for w in wv if w and w["verdict"] == "needs_review")
+        n_crit = sum(1 for w in wv if w and w["verdict"] == "fail" and w["severity"] == "critical")
+        filters += [f'<button class="f" data-v="j:flagged">judge: review queue ({n_fail + n_rev})</button>',
+                    f'<button class="f" data-v="j:fail">judge: fail ({n_fail})</button>',
+                    f'<button class="f" data-v="j:crit">judge: critical ({n_crit})</button>',
+                    f'<button class="f" data-v="j:review">judge: needs review ({n_rev})</button>']
     filters += [f'<button class="f" data-v="{html.escape(b)}">{html.escape(b)}</button>'
                 for b in behaviours]
 
@@ -352,7 +446,8 @@ def main() -> None:
     # replies_round*.json are globbed: a run may have any number of rounds.
     fixed = [("transcripts.md", "same transcripts, plain text and greppable"),
              ("results.csv", "the sheet with `response` filled, `verdict` blank"),
-             ("state.json", "raw record incl. every conversation_id")]
+             ("state.json", "raw record incl. every conversation_id"),
+             ("judgments.json", "the judge's per-turn verdicts")]
     rounds = [(p.name, "the replies sent as the user")
               for p in sorted(OUT.glob("replies_round*.json"))]
     links = []
@@ -380,7 +475,7 @@ def main() -> None:
  </div>
 </header>
 <main>
-{"".join(card(r) for r in records)}
+{"".join(card(r, judgments) for r in records)}
 <div id="empty" class="hidden">no conversation matches that filter</div>
 </main>
 <script>{JS}</script>
