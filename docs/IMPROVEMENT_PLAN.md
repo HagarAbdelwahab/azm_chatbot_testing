@@ -24,11 +24,11 @@ What the code already supports:
   - [x] F1: save `turn.error` in `_turn_record` (`tools/run_conversations.py:90`) and skip judging turns that have an error
   - [x] F2: in `cmd_judge` (`tools/run_conversations.py:559`), only skip a turn if its stored `run_id` matches the bot turn's `run_id`
   - [x] F3: save `handoff_offer` in `_turn_record` and pass it to the judge's `meta` (`tools/run_conversations.py:578`)
-- [ ] **2. Create a frozen regression set** (40–60 conversations) in one file under `data/`:
-  - [ ] 20–30 real prod conversations from a pull (`pull.json` can be kept as a fixed input)
-  - [ ] the `data/golden.yaml` cases
-  - [ ] the scenario YAMLs
-  - [ ] change it only on purpose
+- [x] **2. Create a frozen regression set** (49 conversations, 220 user turns): `data/frozen_set.yaml` holds the choice, `tools/build_frozen_set.py` builds it into `data/prod_pulls/frozen/v1/pull.json` (gitignored: it holds real prod text), which `replay_conversations.py` runs unchanged
+  - [x] 25 real prod conversations from the 2026-09-10→13 pull: multi-turn, one per title, 8 handoff + 8 abstention + 9 other
+  - [x] the 12 `data/golden.yaml` cases
+  - [x] the 12 `data/conversation_scenarios.yaml` scenarios (the 96 early probes left out to stay in the 40–60 range)
+  - [x] change it only on purpose: `--pick` refuses to overwrite the manifest without `--force`
 - [ ] **3. Calibrate the judge:**
   - [ ] add an `approved_answer` column to `data/golden_investment_division.csv`, using answers checked against the KB (turns on accuracy grading, F20)
   - [ ] label 30–50 bot turns pass/fail by hand, including dialect and failing cases

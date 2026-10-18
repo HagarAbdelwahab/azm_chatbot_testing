@@ -1,0 +1,35 @@
+# Frozen regression set — change only on purpose; a change means a new baseline.
+# Built into a replay input by tools/build_frozen_set.py.
+version: v1
+picked_at: '2026-10-18'
+rule: multi-turn, one per title, 8 handoff + 8 abstention + 9 other, evenly spaced
+  in time
+prod_pull: data/prod_pulls/restricted/2026-09-10T0000_to_2026-09-13T1125Z/pull.json
+prod_ids:
+- bfd6240b-dfed-4b53-a99b-64032ed928bd
+- 700997b9-1378-49f2-b421-b9ff8d0fab15
+- 458dcaee-ace0-4fcc-b0a5-7fc6a8202fee
+- c1ff0fd8-2378-4632-8849-6b5f5e424a22
+- 16fd753f-14bd-48af-976d-e701f36aea45
+- 72c7d19f-c4ef-4df9-a977-68a6da22f2b8
+- ca2dd9aa-6f9f-4f4d-8655-610e7a9a53ef
+- c9c4ac69-8ac9-4e0e-8d19-e89f450e4f5c
+- 69f2266a-62c4-415e-a078-f32f5f8a13c5
+- acf12af9-9c6f-4571-86c8-5bbb357c7497
+- 86bc819d-82fd-432f-a394-3e2040ac7c6b
+- 038d6436-1e78-4d5c-ac65-d840e4f3c596
+- abafa0cc-07a3-4cc8-8637-f9a65618a845
+- f913c5c1-db01-429c-b07e-f647f1d49b82
+- 4d42fb14-24ac-4a32-b51e-9bb97c37a8f0
+- e840a3b3-7181-4285-9a7c-2a5277927fcd
+- 1bbe89f8-5993-4e06-83b1-09c0fd296886
+- 7eb59962-4413-4c5c-97a6-37d0da03fbb3
+- df9c789e-99f1-451b-8438-a36393e7bf08
+- 9284b080-acab-44bd-a4fd-f9e1478bad88
+- 38a98f84-5acb-4067-ad1d-011bd1771242
+- 63de2b0a-2353-4c84-aa7f-ba996248b141
+- 406d27e6-3b06-4c47-b09c-baeabf0ffdac
+- e300df2e-a70e-4889-823e-c8a507613491
+- 02da23a7-506a-4c32-9113-8d18c90d19f6
+golden: data/golden.yaml
+scenarios: data/conversation_scenarios.yaml

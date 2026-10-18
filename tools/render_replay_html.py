@@ -374,7 +374,8 @@ def conv_page(idx: int, prod_conv: dict, rec: dict, rows: list[dict], cls: dict,
         f'         <span class="pill quiet">{"+" if delta > 0 else ""}{delta} chars</span></div>'
         f'    <h2 dir="{direction(title)}">{title}</h2>'
         f'    <div class="tags">{tag_html(cls["tags"])}</div>'
-        f'    <p class="ids">production <code>{prod_conv["prod_conversation_id"][:8]}</code>'
+        # Frozen-set ids like "scenario:S01" are short and only unique in full.
+        f'    <p class="ids">production <code>{html.escape(pid if ":" in (pid := prod_conv["prod_conversation_id"]) else pid[:8])}</code>'
         f'       · {html.escape(str(prod_conv.get("created_at") or ""))}'
         f'       · replay <code>{html.escape(str(rec.get("replay_conversation_id", "-"))[:8])}</code>'
         f'       · {len(rows)} turns</p>'
