@@ -152,20 +152,51 @@ def test_judge_without_key_exits_cleanly(run_dir, monkeypatch):
     assert not (run_dir / "judgments.json").exists()
 
 
-def test_agreement_counts_needs_review_as_flagged(run_dir, capsys):
-    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
-    state["T02"] = dict(state["T01"], id="T02", transcript=[
-        {"role": "user", "text": "q"}, {"role": "bot", "text": "a", "run_id": "r3"}])
-    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+def _label_sheet(run_dir, rows: str):
+    sheet = run_dir / "turns_to_label.csv"
+    sheet.write_text("key,run_id,verdict\n" + rows, encoding="utf-8")
+    return sheet
+
+
+def test_agreement_is_per_turn_with_confusion_matrix(run_dir, capsys):      # F9
     (run_dir / "judgments.json").write_text(json.dumps({
-        "T01/1": {"verdict": "pass", "run_id": "r1"},
-        "T01/2": {"verdict": "needs_review", "run_id": "r2"},
-        "T02/1": {"verdict": "pass", "run_id": "r3"}}), encoding="utf-8")
-    sheet = run_dir / "reviewed.csv"
-    sheet.write_text("id,verdict\nT01,fail\nT02,fail\n", encoding="utf-8")
-    rc.judge_agreement(sheet)
+        "T01/1": {"verdict": "pass", "run_id": "r1", "reason": "looked fine"},
+        "T01/2": {"verdict": "needs_review", "run_id": "r2", "reason": "unsure"}}),
+        encoding="utf-8")
+    rc.judge_agreement(_label_sheet(run_dir, "T01/1,r1,fail\nT01/2,r2,fail\n"))
     out = capsys.readouterr().out
-    assert "agreement 1/2 = 50%" in out and "T02" in out
+    # needs_review is its own column, not a fail, and not in the agreement %
+    assert "agreement 0/1 = 0%" in out
+    assert "missed fails (human fail, judge pass): 1" in out
+    assert "T01/1" in out and "looked fine" in out
+
+
+def test_agreement_skips_labels_on_a_reasked_answer(run_dir, capsys):
+    (run_dir / "judgments.json").write_text(json.dumps({
+        "T01/1": {"verdict": "pass", "run_id": "r1", "reason": ""},
+        "T01/2": {"verdict": "pass", "run_id": "r2", "reason": ""}}), encoding="utf-8")
+    rc.judge_agreement(_label_sheet(run_dir, "T01/1,r1,pass\nT01/2,OLD,fail\n"))
+    out = capsys.readouterr().out
+    assert "agreement 1/1 = 100%" in out and "skipped 1 label(s)" in out
+
+
+def test_label_sheet_has_no_judge_verdict_and_keeps_labels(run_dir, monkeypatch):
+    monkeypatch.setattr(rc, "LABELS", run_dir / "turns_to_label.csv")
+    state = rc.load_state()
+    path = rc.write_label_sheet(state)
+    import csv
+    rows = list(csv.DictReader(path.open(encoding="utf-8-sig")))
+    assert [r["key"] for r in rows] == ["T01/1", "T01/2"]
+    assert not any(c.startswith("judge") for c in rows[0])
+    assert rows[0]["approved_answer"] == "approved" and rows[1]["approved_answer"] == ""
+
+    rows[0]["verdict"], rows[1]["verdict"] = "pass", "fail"
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=rc.LABEL_COLS)
+        w.writeheader(); w.writerows(rows)
+    state["T01"]["transcript"][3]["run_id"] = "r2-new"      # turn 2 re-asked
+    rows = list(csv.DictReader(rc.write_label_sheet(state).open(encoding="utf-8-sig")))
+    assert [r["verdict"] for r in rows] == ["pass", ""]      # stale label dropped
 
 
 # ---------------------------------------------------------------- data bugs F1-F3

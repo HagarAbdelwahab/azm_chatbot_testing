@@ -30,9 +30,9 @@ What the code already supports:
   - [x] the 12 `data/conversation_scenarios.yaml` scenarios (the 96 early probes left out to stay in the 40–60 range)
   - [x] change it only on purpose: `--pick` refuses to overwrite the manifest without `--force`
 - [ ] **3. Calibrate the judge:**
-  - [ ] add an `approved_answer` column to `data/golden_investment_division.csv`, using answers checked against the KB (turns on accuracy grading, F20)
+  - [ ] add an `approved_answer` column to `data/golden_investment_division.csv` (column added, empty: answers still to write), using answers checked against the KB (turns on accuracy grading, F20)
   - [ ] label 30–50 bot turns pass/fail by hand, including dialect and failing cases
-  - [ ] change `judge_agreement` to compare individual turns rather than whole conversations, and print a confusion matrix (F9)
+  - [x] change `judge_agreement` to compare individual turns rather than whole conversations, and print a confusion matrix (F9). The labelling sheet is `reports/conversations/turns_to_label.csv`, written by `export` without the judge's verdicts
   - [ ] run `run_conversations.py judge --agree`; below 90% agreement, adjust the prompt and examples in `judge.py` and repeat
   - [ ] until it passes, use the judge only to order what you read, not to decide
 

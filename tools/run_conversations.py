@@ -480,7 +480,8 @@ def cmd_export(args) -> None:
 
     # CSV — the original sheet with `response` filled in, verdict left for the reviewer.
     # When `judge` has run, its worst per-conversation verdict fills the judge_* columns;
-    # the human `verdict` column stays blank so `judge --agree` can compare the two.
+    # the human `verdict` column is for the reviewer. `judge --agree` reads the per-turn
+    # turns_to_label.csv instead (written below).
     judgments = current_judgments(state, load_judgments())
     csv_path = OUT / "results.csv"
     with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
@@ -512,7 +513,47 @@ def cmd_export(args) -> None:
                 convo, "", "",
             ])
 
-    print(f"wrote {md_path.relative_to(ROOT)}\nwrote {csv_path.relative_to(ROOT)}")
+    label_path = write_label_sheet(state)
+    print(f"wrote {md_path.relative_to(ROOT)}\nwrote {csv_path.relative_to(ROOT)}"
+          f"\nwrote {label_path.relative_to(ROOT)}")
+
+
+LABELS = OUT / "turns_to_label.csv"
+LABEL_COLS = ["key", "id", "turn", "expected_behavior", "risk", "user_message", "bot_reply",
+              "approved_answer", "run_id", "verdict", "reviewer_notes"]
+
+
+def write_label_sheet(state: dict) -> pathlib.Path:
+    """One row per bot turn, for a human to mark pass/fail — the input to `judge --agree`.
+
+    Deliberately WITHOUT the judge's verdict: a labeller who can see it tends to agree
+    with it, and the agreement score then measures nothing. Labels already filled in are
+    kept on re-export as long as the turn's run_id is unchanged (same answer)."""
+    kept = {}
+    if LABELS.exists():
+        with LABELS.open(encoding="utf-8-sig", newline="") as f:
+            kept = {r["key"]: r for r in csv.DictReader(f) if (r.get("verdict") or "").strip()}
+    with LABELS.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=LABEL_COLS)
+        w.writeheader()
+        for rid, rec in sorted(state.items()):
+            for n, user, bot, _ in bot_turns(rec):
+                key = f"{rid}/{n}"
+                old = kept.get(key, {})
+                same = old.get("run_id") == bot.get("run_id", "")
+                w.writerow({
+                    "key": key, "id": rid, "turn": n,
+                    "expected_behavior": rec.get("expected_behavior", ""),
+                    "risk": rec.get("risk", ""),
+                    "user_message": user["text"],
+                    "bot_reply": (f"(generation failed: {bot['error']})" if bot.get("error")
+                                  else bot["text"]),
+                    "approved_answer": rec.get("approved_answer", "") if n == 1 else "",
+                    "run_id": bot.get("run_id", ""),
+                    "verdict": old.get("verdict", "") if same else "",
+                    "reviewer_notes": old.get("reviewer_notes", "") if same else "",
+                })
+    return LABELS
 
 
 # ---------------------------------------------------------------- judge
@@ -549,11 +590,6 @@ def current_judgments(state: dict, judgments: dict) -> dict:
             for rid, rec in state.items() for n, _, bot, _ in bot_turns(rec)}
     return {k: j for k, j in judgments.items()
             if k in live and j.get("run_id", "") == live[k]}
-
-
-def worst_verdict(rec_id: str, judgments: dict) -> str | None:
-    mine = [j["verdict"] for k, j in judgments.items() if k.split("/")[0] == rec_id]
-    return max(mine, key=VERDICT_RANK.get) if mine else None
 
 
 def cmd_judge(args) -> None:
@@ -645,35 +681,58 @@ def cmd_judge(args) -> None:
 
 
 def judge_agreement(path: pathlib.Path) -> None:
-    """Judge vs human: compare the worst judge verdict per row to a reviewer's `verdict`
-    column (pass / fail, or ✓ / ✗, or نجح / فشل). Run this before trusting the judge to
-    replace manual review — and again whenever the judge prompt or model changes."""
+    """Judge vs human, per bot turn: compare each judged turn to the reviewer's `verdict`
+    (pass / fail, or ✓ / ✗, or نجح / فشل) in turns_to_label.csv. Run this before trusting
+    the judge to replace manual review — and again whenever the judge prompt or model changes.
+
+    Agreement is over turns where the judge DECIDED (pass/fail). needs_review is shown in
+    its own column, not counted as a fail: it is the judge abstaining, not disagreeing."""
     judgments = current_judgments(load_state(), load_judgments())
     if not judgments:
         sys.exit(f"no current judgments in {JUDGMENTS.relative_to(ROOT)} — run `judge` first")
     with path.open(encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
+    if rows and "key" not in rows[0]:
+        sys.exit(f"{path} has no `key` column — label turns_to_label.csv (written by "
+                 "`export`), one row per bot turn")
     norm = {"pass": "pass", "ok": "pass", "✓": "pass", "نجح": "pass", "سليم": "pass",
             "fail": "fail", "✗": "fail", "x": "fail", "فشل": "fail", "خطأ": "fail"}
-    pairs, disagree = 0, []
+    matrix = collections.Counter()               # (human, judge) -> count
+    disagree, stale = [], []
     for r in rows:
         human = norm.get((r.get("verdict") or "").strip().lower())
-        rid = (r.get("id") or "").strip()
-        machine = worst_verdict(rid, judgments)
-        if not human or not machine:
+        key = (r.get("key") or "").strip()
+        if not human or key not in judgments:
             continue
-        pairs += 1
-        machine_pf = "pass" if machine == "pass" else "fail"   # needs_review counts as flagged
-        if machine_pf != human:
-            disagree.append((rid, human, machine))
-    if not pairs:
-        sys.exit(f"no row in {path} has both a human `verdict` and a judged id — "
-                 "fill the verdict column for a sample first")
-    agree = pairs - len(disagree)
-    print(f"agreement {agree}/{pairs} = {100 * agree / pairs:.0f}%  (target ≥ 90% before "
-          "reviewing only the flagged queue)")
-    for rid, human, machine in disagree:
-        print(f"  {rid:10} human={human:5} judge={machine}")
+        j = judgments[key]
+        if r.get("run_id") and r["run_id"] != j.get("run_id"):
+            stale.append(key)                    # labelled a different answer than was judged
+            continue
+        matrix[human, j["verdict"]] += 1
+        if j["verdict"] in ("pass", "fail") and j["verdict"] != human:
+            disagree.append((key, human, j))
+    labelled = sum(matrix.values())
+    if not labelled:
+        sys.exit(f"no row in {path} has both a human `verdict` and a judged turn — "
+                 "label a sample first")
+
+    decided = sum(n for (_, jv), n in matrix.items() if jv != "needs_review")
+    agree = decided - len(disagree)
+    print(f"{labelled} labelled turn(s)\n")
+    print(f"{'':14}{'judge pass':>12}{'judge fail':>12}{'needs_review':>14}")
+    for h in ("pass", "fail"):
+        print(f"{'human ' + h:14}" + "".join(
+            f"{matrix[h, jv]:>{w}}" for jv, w in (("pass", 12), ("fail", 12), ("needs_review", 14))))
+    if decided:
+        print(f"\nagreement {agree}/{decided} = {100 * agree / decided:.0f}% of turns the judge "
+              "decided  (target ≥ 90% before reviewing only the flagged queue)")
+    # The costly miss: the judge passed a turn a human failed — it would never be read.
+    print(f"missed fails (human fail, judge pass): {matrix['fail', 'pass']}"
+          f"   false alarms (human pass, judge fail): {matrix['pass', 'fail']}")
+    for key, human, j in sorted(disagree, key=lambda d: d[1] != "fail"):
+        print(f"  {key:12} human={human:5} judge={j['verdict']:5} {j['reason'][:100]}")
+    if stale:
+        print(f"skipped {len(stale)} label(s) on answers since re-asked: {', '.join(stale)}")
 
 
 # ---------------------------------------------------------------- cli
@@ -757,7 +816,7 @@ def main() -> None:
     j.add_argument("--only", nargs="+", metavar="ID", help="judge only these conversation ids")
     j.add_argument("--model", help="override JUDGE_MODEL, e.g. claude-opus-5-5 for a release gate")
     j.add_argument("--agree", type=pathlib.Path, metavar="CSV",
-                   help="compare judge verdicts to a reviewer-filled `verdict` column instead")
+                   help="compare judge verdicts per turn to a labelled turns_to_label.csv instead")
     j.set_defaults(func=cmd_judge)
 
     ar = sub.add_parser("archive", help="move the finished run into a date-time folder")

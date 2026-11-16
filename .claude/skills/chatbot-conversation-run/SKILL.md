@@ -193,8 +193,9 @@ first, critical on top, then `needs_review`. Passing turns need no human read.
 - Cost is about one Sonnet call per bot turn.
 - To give it an accuracy reference, put an `answer` / `approved_answer` / `الإجابة`
   column in the question CSV.
-- Before trusting it to replace manual review, have a reviewer fill `verdict` in
-  `results.csv` for a sample and run `judge --agree reports/conversations/results.csv`.
+- Before trusting it to replace manual review, have a reviewer fill `verdict` per bot turn in
+  `turns_to_label.csv` (written by `export`, judge verdicts hidden) for a sample and run
+  `judge --agree reports/conversations/turns_to_label.csv`.
   Aim for ≥ 90% agreement. `python judge.py` runs the calibration fixtures.
 - The judge is a triage filter, not ground truth: spot-check a few `pass` turns per run.
 </judge>

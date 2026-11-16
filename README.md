@@ -112,7 +112,7 @@ To check the judge's calibration, run `.venv/bin/python judge.py`.
 
 **Calibrate it before you trust it:**
 - `.venv/bin/python judge.py` checks the judge against known fixtures.
-- Have a reviewer fill `verdict` in `results.csv` for a sample, then run `run_conversations.py judge --agree reports/conversations/results.csv`.
+- Have a reviewer fill `verdict` per bot turn in `turns_to_label.csv` (written by `export`, with the judge's verdicts hidden) for a sample, then run `run_conversations.py judge --agree reports/conversations/turns_to_label.csv`. It prints a confusion matrix and the turns the judge passed but the reviewer failed.
 - Aim for at least 90% agreement before you drop full manual review.
 - After that, keep spot-checking a few `pass` turns per run.
 
