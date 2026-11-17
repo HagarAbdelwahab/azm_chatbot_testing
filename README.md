@@ -127,7 +127,25 @@ To check the judge's calibration, run `.venv/bin/python judge.py`.
 | Abstention audit | `.venv/bin/python tools/abstention_audit.py --tenant restricted --day 2026-09-10` |
 | Handoff SLA audit | `.venv/bin/python tools/handoff_audit.py --days 4 --cross-check` |
 
-Common flags: `--start/--end` (full ISO bounds), `--last-hours N`, `--limit N`, `--count-only`, `--fresh`, `--include-test`.
+Common flags: `--start/--end` (full ISO bounds), `--last-hours N`, `--limit N`, `--count-only`, `--fresh`, `--include-test`, `--bot-id`.
+
+#### Agentic flow as a signed-in user (ops portal)
+
+The plain replay is anonymous, so the agent never runs the `tarekat_*` tools. `replay_ops_user.py` logs in on the portal in a real browser (SSO), takes the user's chat token through the portal's own `AzmChat.identify` callback, exchanges it like the widget does, and sends every turn with the ops widget key plus `Authorization: Bearer <user token>`.
+
+```bash
+.venv/bin/pip install playwright && .venv/bin/python -m playwright install chromium   # once
+# .env: OPS_PORTAL, OPS_USERNAME, OPS_PASSWORD (the test heir); optional OPS_HEIRS_DEED_NUMBER, OPS_IBAN (static swap values)
+.venv/bin/python tools/pull_prod_conversations.py --tenant restricted \
+    --start <7 days ago, ISO> --end <now, ISO> --limit 20            # read-only production pull
+.venv/bin/python tools/replay_ops_user.py <pull.json>          # --headed to watch the browser
+.venv/bin/python tools/render_replay_html.py reports/replay/ops-user/<label>
+```
+
+- **Source is always production phrasing; every identifier is swapped** (`tools/persona_swap.py`). Claude (`claude-opus-5-5`, needs `ANTHROPIC_API_KEY`) tags each identifier in the user turns with its owner: the user's or deceased's or an heir's national ID and name, plus request, division, deed, invoice, ticket, phone, IBAN and CR numbers. Each conversation is then rewritten against one real ops case of the signed-in user (from `/api/v1/my-requests` and the chatbot tools): the same request number the portal shows, deceased, heirs and deeds. Values the ops user has no counterpart for (division numbers, the inheritance-deed number, invoices, outsiders) get a same-shape synthetic value. No production identifier is sent to ops. Each swap is listed masked on its turn in the report; the raw tags are cached in the run's `tags.json` (gitignored). `--numbers-only` falls back to swapping request numbers by pattern without the API. `--rules` tags without the API by shape and keywords: SA+22 digits = IBAN, 05…/9665… = phone, 10 digits starting 1/2 = national ID, any other 5–20 digit number = deed/request/ticket/invoice number by the nearby word (default request); amounts before ريال are skipped. Names are NOT swapped in this mode.
+- The ops widget writes to the testing tenant (bot `eac13477…`); `360c3a54…` is this repo's own key.
+- Ops portal tokens live 2 minutes. When a turn gets HTTP 401 or tells the signed-in user to log in, the tool reloads the portal (re-logging in if needed), re-exchanges and re-sends that turn once, recorded as `identity_retry`.
+- Per turn it records the `tarekat_*` tools used, `told_to_log_in`, `asked_about_other` (the user named a request that isn't theirs) and `numbers_not_owned` (numbers in the answer outside the user's own requests, a triage flag for review). The user's own requests come from the same backend tool the agent calls.
 
 > The replay sends real users' messages to the testing agent, which costs LLM calls. The pull and the audits only issue GETs.
 > Production data lands in `data/prod_pulls/` and `reports/`. Both are gitignored, so keep it that way.

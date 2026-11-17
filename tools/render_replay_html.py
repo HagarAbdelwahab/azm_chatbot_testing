@@ -32,6 +32,11 @@ from pathlib import Path
 
 ARABIC = re.compile(r"[؀-ۿ]")
 
+# Side labels. A run can override them in meta.json["labels"] (replay_ops_user.py does:
+# its source is the ops widget, not production).
+LABELS = {"source": "Production · restricted", "replay": "Replay · testing",
+          "title": "Production replay"}
+
 # Masked for display only. Order matters: the specific patterns run before the generic
 # long-digit rule, or that rule eats their numeric tails first.
 #
@@ -215,6 +220,18 @@ def classify(rows: list[dict], rec: dict, prod_conv: dict) -> dict:
     if any(((r["replay"] or {}).get("bot") or "").strip() == "" and
            not (r["replay"] or {}).get("confirmation_request") for r in rows if r["replay"]):
         tags.append("empty-reply")
+    # Signed-in replays (replay_ops_user.py) carry user-scope checks per turn.
+    reps = [r["replay"] or {} for r in rows]
+    if any(t.get("told_to_log_in") for t in reps):
+        tags.append("told-to-log-in")
+    if any(t.get("identity_retry") for t in reps):
+        tags.append("identity-refreshed")
+    if any(t.get("tarekat_tools") for t in reps):
+        tags.append("agentic-tools")
+    if any(t.get("asked_about_other") for t in reps):
+        tags.append("asked-about-other-request")
+    if any(t.get("numbers_not_owned") for t in reps):
+        tags.append("number-not-owned")
     if prod_conv.get("handoff_requested_at"):
         tags.append("prod-handoff")
     if avg is not None and avg < 0.35:
@@ -287,6 +304,22 @@ def panels(t: dict) -> str:
                 f'<p class="note">target: {html.escape(str(cr.get("target") or ""))}</p></details>')
 
     bits = []
+    for sw in t.get("substitutions") or []:
+        bits.append(f'swapped {html.escape(str(sw.get("type", "request_number")))} '
+                    f'{html.escape(sw["original"])} → {html.escape(str(sw["replacement"]))} '
+                    f'({html.escape(sw.get("source") or sw.get("reason") or "")})')
+    if t.get("federated_as"):
+        bits.append(f'signed in as {html.escape(str(t["federated_as"]))}')
+    if t.get("identity_retry"):
+        bits.append(f'⚠ identity refreshed and turn re-sent ({html.escape(str(t["identity_retry"]))})')
+    if t.get("told_to_log_in"):
+        bits.append('⚠ told a signed-in user to log in')
+    if t.get("asked_about_other"):
+        bits.append(f'user named a request that is not theirs: '
+                    f'{html.escape(", ".join("••" + n[-4:] for n in t["asked_about_other"]))}')
+    if t.get("numbers_not_owned"):
+        bits.append(f'⚠ answer has numbers outside the user\'s requests (review): '
+                    f'{html.escape(", ".join("••" + n[-4:] for n in t["numbers_not_owned"]))}')
     if t.get("abstention_reason"):
         bits.append(f'abstention: {html.escape(str(t["abstention_reason"]))}')
     if t.get("handoff_status"):
@@ -353,9 +386,9 @@ def conv_page(idx: int, prod_conv: dict, rec: dict, rows: list[dict], cls: dict,
             f'      <span class="lbl">User asked</span>{rich(u)}</div>'
             f'  <div class="cols">'
             f'    <div class="col prod"><div class="colhead">'
-            f'        <span class="dot p"></span>Production · restricted</div>{prod_html}</div>'
+            f'        <span class="dot p"></span>{html.escape(LABELS['source'])}</div>{prod_html}</div>'
             f'    <div class="col test"><div class="colhead">'
-            f'        <span class="dot t"></span>Replay · testing</div>{rep_html}</div>'
+            f'        <span class="dot t"></span>{html.escape(LABELS['replay'])}</div>{rep_html}</div>'
             f'  </div>'
             f'</article>')
 
@@ -430,7 +463,7 @@ def overview_page(meta: dict, index_rows: list[dict], stats: dict, pull_path: Pa
         f'<section class="page" id="page-overview">'
         f'  <div class="pagehead">'
         f'    <div class="ph-top"><span class="counter">Overview</span></div>'
-        f'    <h2>Production replay — {html.escape(day)}</h2>'
+        f'    <h2>{html.escape(LABELS["title"])} — {html.escape(day)}</h2>'
         f'    <p class="lede">Real conversations from '
         f'      <strong>{html.escape(str(meta.get("prod_tenant", "?")))}</strong> (production), '
         f'      re-sent verbatim to <strong>{html.escape(str(meta.get("replay_tenant", "?")))}</strong>. '
@@ -672,6 +705,7 @@ def main() -> None:
         sys.exit(f"no state.json in {run_dir} — run replay_conversations.py first.")
     state = json.loads(state_f.read_text(encoding="utf-8"))
     meta = json.loads(meta_f.read_text(encoding="utf-8")) if meta_f.exists() else {}
+    LABELS.update(meta.get("labels") or {})
 
     pull_path = Path(meta.get("pull_file", ""))
     if not pull_path.exists():
@@ -732,10 +766,10 @@ def main() -> None:
 
     page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Replay {html.escape(day)} — production vs testing</title><style>{CSS}</style></head>
+<title>{html.escape(LABELS['title'])} {html.escape(day)}</title><style>{CSS}</style></head>
 <body><div class="app">
 <aside class="side">
-  <div class="brand"><b>Production replay</b><span>{html.escape(day)} ·
+  <div class="brand"><b>{html.escape(LABELS['title'])}</b><span>{html.escape(day)} ·
     {html.escape(str(meta.get('prod_tenant', '?')))} → {html.escape(str(meta.get('replay_tenant', '?')))}</span></div>
   <div class="sidetools">
     <input id="q" placeholder="search all conversations…">
