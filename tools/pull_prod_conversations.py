@@ -65,6 +65,8 @@ def main() -> None:
     p.add_argument("--contains", help="server-side ILIKE filter over message content")
     p.add_argument("--include-test", action="store_true",
                    help="also include playground traffic (default: production only)")
+    p.add_argument("--bot-id", help="only this bot's conversations (a tenant can serve several "
+                                    "widgets, e.g. the ops portal and this harness's own key)")
     p.add_argument("--fresh", action="store_true", help="overwrite an existing pull")
     p.add_argument("--workers", type=int, default=6)
     p.add_argument("--count-only", action="store_true",
@@ -104,7 +106,8 @@ def main() -> None:
         # per-conversation transcript fetches. Capping the list instead would make
         # `--limit 25 --min-turns 2` quietly return fewer than 25.
         summaries = api.list_conversations(
-            tid, start=start, end=end, include_test=args.include_test, q=args.contains)
+            tid, start=start, end=end, include_test=args.include_test, q=args.contains,
+            bot_id=args.bot_id)
 
         print(f"found    {len(summaries)} conversations "
               f"({'production only' if not args.include_test else 'including playground'})")
@@ -174,6 +177,7 @@ def main() -> None:
         "window": {"start": start, "end": end, "day": args.day, "timezone": "UTC"},
         "selection": {"mode": "all" if args.all else f"first {args.limit}",
                       "min_turns": args.min_turns, "contains": args.contains,
+                      "bot_id": args.bot_id,
                       "include_test": args.include_test},
         "found_in_window": len(summaries),
         "kept": len(convs), "skipped_below_min_turns": skipped_short, "transcript_failures": failed,

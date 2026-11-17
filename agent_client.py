@@ -212,12 +212,22 @@ def _extract(frame: dict, turn: Turn) -> None:
 
 class AgentClient:
     def __init__(self, timeout: float = 60.0, origin: str | None = ORIGIN,
-                 api_key: str = KEY):
+                 api_key: str = KEY, base_url: str = BASE, bearer: str | None = None):
         headers = {"x-api-key": api_key, "content-type": "application/json"}
         if origin:                      # widget keys are origin-checked; pass None to test that
             headers["origin"] = origin
             headers["referer"] = origin + "/"
-        self._c = httpx.Client(base_url=BASE, timeout=timeout, headers=headers)
+        self._c = httpx.Client(base_url=base_url, timeout=timeout, headers=headers)
+        self.set_bearer(bearer)
+
+    def set_bearer(self, token: str | None) -> None:
+        """Signed-in (federated) chat: the exchanged user token the widget sends as
+        `Authorization: Bearer`, next to the key. Without it every call is anonymous and
+        the agent will not run the `tarekat_*` tools. See tools/ops_session.py."""
+        if token:
+            self._c.headers["authorization"] = f"Bearer {token}"
+        else:
+            self._c.headers.pop("authorization", None)
 
     def new_conversation(self) -> str:
         r = self._c.post("/conversations", content=b"")
