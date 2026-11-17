@@ -149,12 +149,17 @@ def substitute_requests(conv: dict, pool: dict[str, list[str]], seed: int):
     return out, subs
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def ask_as_user(client: AgentClient, session: OpsUserSession, cid: str, msg: str):
     """One turn as the signed-in user; on a lost identity refresh and retry once."""
     retry = None
     for attempt in (1, 2):
         session.keepalive()
         client.set_bearer(session.current(force=attempt == 2).access_token)
+        sent_at = _now()
         try:
             turn = client.ask(msg, conversation_id=cid)
         except httpx.HTTPStatusError as e:
@@ -168,7 +173,9 @@ def ask_as_user(client: AgentClient, session: OpsUserSession, cid: str, msg: str
         if lost and attempt == 1:
             retry = "told-to-log-in"
             continue
+        turn.sent_at, turn.replied_at = sent_at, _now()
         return turn, retry
+    turn.sent_at, turn.replied_at = sent_at, _now()
     return turn, retry
 
 
@@ -187,6 +194,9 @@ def replay_conv(client, session, conv, own: set[str], swap) -> dict:
             t["tarekat_tools"] = [x for x in t["tools"] if (x or "").startswith("tarekat_")]
             t["told_to_log_in"] = bool(LOGIN_PROMPT.search(ans)) and not t["tarekat_tools"]
             t["identity_retry"] = retry
+            # Wall clock of the attempt that produced the answer (UTC, ms). On a retried
+            # turn the first attempt's time is lost on purpose: it never got an answer.
+            t["sent_at"], t["replied_at"] = turn.sent_at, turn.replied_at
             t["asked_about_other"] = not_owned(numbers(msg), own)
             # A number the user typed is echoed back legitimately ("432425 is not among
             # your requests"); whether the answer then DESCRIBES it is the reviewer's call.

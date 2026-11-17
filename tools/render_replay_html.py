@@ -331,7 +331,11 @@ def panels(t: dict) -> str:
     if t.get("unknown_keys"):
         bits.append(f'⚠ unparsed frame keys: {", ".join(t["unknown_keys"])}')
     if t.get("total_ms"):
-        bits.append(f'{t["total_ms"]} ms')
+        timing = f'first text {t["first_content_ms"] / 1000:.1f}s · ' if t.get("first_content_ms") else ''
+        bits.append(f'{timing}full reply {t["total_ms"] / 1000:.1f}s')
+    if t.get("sent_at"):
+        bits.append(f'sent {html.escape(t["sent_at"][11:23])} → replied '
+                    f'{html.escape((t.get("replied_at") or "")[11:23])} UTC')
     if bits:
         out += f'<p class="meta-line">{" · ".join(bits)}</p>'
     return out
