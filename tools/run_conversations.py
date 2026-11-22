@@ -223,8 +223,6 @@ def ask_one(row: dict) -> tuple[str, dict]:
     cid = row.get("id") or row["question"][:20]
     with make_client(120) as c:
         turn = c.ask(row["question"])
-    print(f"  {cid}: {turn.total_ms}ms  tools={[s.get('tool') for s in turn.steps] or '—'}  "
-          f"abstain={turn.abstention_reason or '—'}", flush=True)
     return cid, {
         "id": cid,
         "question": row["question"],
@@ -270,8 +268,6 @@ def run_scenario(sc: dict) -> tuple[str, dict]:
         for i, msg in enumerate(sc["turns"], start=1):
             turn = ask_with_retry(client, msg, cid)
             transcript.extend(_turn_record(turn))
-            print(f"  {sid} turn {i}/{len(sc['turns'])}: {turn.total_ms}ms  "
-                  f"tools={[s.get('tool') for s in turn.steps] or '—'}", flush=True)
     except Exception as exc:                 # keep the turns we did get
         print(f"  !! {sid} stopped after {len(transcript)//2} turn(s): "
               f"{type(exc).__name__}: {exc}", flush=True)
@@ -379,8 +375,6 @@ def cmd_deepen(args) -> None:
                 msg = opening if step.get("repeat_opening") else step["text"]
                 turn = client.ask(msg, conversation_id=rec["conversation_id"])
                 rec["transcript"].extend(_turn_record(turn))
-                print(f"  {cid} {step['id']} ({step['pattern']}): {turn.total_ms}ms  "
-                      f"tools={[s.get('tool') for s in turn.steps] or '—'}", flush=True)
         finally:
             client.close()
         return cid
@@ -425,8 +419,6 @@ def cmd_reply(args) -> None:
                     print(f"  {cid}: FAILED — {type(exc).__name__}", flush=True)
                     break
                 record["transcript"].extend(_turn_record(turn))
-                print(f"  {cid}: +1 turn  {turn.total_ms}ms  "
-                      f"tools={[s.get('tool') for s in turn.steps] or '—'}", flush=True)
         finally:
             client.close()
         return cid
@@ -535,8 +527,166 @@ def cmd_export(args) -> None:
             ])
 
     label_path = write_label_sheet(state)
-    print(f"wrote {md_path.relative_to(ROOT)}\nwrote {csv_path.relative_to(ROOT)}"
-          f"\nwrote {label_path.relative_to(ROOT)}")
+    digest = write_digest(state)
+    print(f"exported {len(state)} conversations (transcripts.md, results.csv, "
+          f"{label_path.name}) · DIGEST: {digest.relative_to(ROOT)}")
+
+
+# ---------------------------------------------------------------- agent digests
+# The agent never needs the whole transcripts.md: `pending` writes only the threads
+# that need a reply, `verify` prints only holes, and `export` writes digest.md for the
+# final summary. All three are masked and clipped.
+
+SOFT_CLOSE = re.compile(r"هل (يمكنني|أستطيع) مساعدتك (في|ب)\S* (أمر|شيء|شي) (آخر|اخر)|anything else", re.I)
+ASKS_DATA = re.compile(r"رقم (الطلب|طلب|الهوية|الصك|السجل)|الرقم المرجعي|request number|national id"
+                       r"|(زودني|تزويدي|أرسل|ارسل|أدخل|ادخل)\S*\s+(ب|برقم)?", re.I)
+OFFERS = re.compile(r"هل (ترغب|تريد|تود|تودين|ترغبين)|تحب (أن|ان)|would you like|shall i", re.I)
+OPTIONS = re.compile(r"(^|\n)\s*(\d+[.)\-]|[•\-*])\s+\S.*\n\s*(\d+[.)\-]|[•\-*])\s+\S", re.S)
+
+
+def _clip(t: str | None, n: int) -> str:
+    from tools.render_replay_html import mask
+    t = " ".join(mask(t or "").split())
+    return t if len(t) <= n else t[:n] + "…"
+
+
+def classify_thread(rec: dict) -> tuple[str, bool]:
+    """(category, needs a reply?) from the LAST bot turn — the SKILL.md reply table in code."""
+    from tools.render_replay_html import is_refusal
+    t = rec["transcript"]
+    bots = [e for e in t if e["role"] == "bot"]
+    if not bots:
+        return "no-bot-turn (hole)", False
+    b = bots[-1]
+    text = (b.get("text") or "").strip()
+    if b.get("confirmation_request"):
+        prev = bots[-2].get("confirmation_request") if len(bots) > 1 else None
+        return ("gate re-issued — stop" if prev else "write gate (approve path not testable)"), False
+    if not text:
+        return "empty reply (hole)", False
+    tail = text[-300:]
+
+    def refused(x: str) -> bool:
+        # is_refusal() also hits "contact support" inside real answers; the canned
+        # fallbacks are short, so only a short reply counts as a refusal here.
+        return is_refusal(x) and len(" ".join(x.split())) < 350
+
+    if refused(text):
+        # The reply table: press a refusal ONCE. Two refusals in a row = pressed and held.
+        if len(bots) > 1 and refused(bots[-2].get("text") or ""):
+            return "refusal held after a press — stop", False
+        return "refusal — press once", True
+    if SOFT_CLOSE.search(tail):
+        return "soft close — nothing blocked", False
+    if ASKS_DATA.search(tail):
+        return "asks for data — send fact-sheet value", True
+    if OPTIONS.search(text) and tail.rstrip().endswith(("؟", "?")):
+        return "options list — pick the scenario's item", True
+    if OFFERS.search(tail):
+        return "offers an action — accept it", True
+    if tail.rstrip().endswith(("؟", "?")):
+        return "asks a question — answer it", True
+    return "answered — nothing blocked", False
+
+
+def cmd_pending(args) -> None:
+    state = load_state()
+    if not state:
+        sys.exit(f"no {STATE.relative_to(ROOT)} — run `ask` first")
+    need, other = [], collections.Counter()
+    for rid in sorted(state):
+        rec = state[rid]
+        cat, reply = classify_thread(rec)
+        if reply:
+            need.append((rid, cat, rec))
+        else:
+            other[cat] += 1
+    out = [f"# Pending replies — {len(need)} of {len(state)} threads need one",
+           "Write replies_roundN.json for THESE ids only (never invent a national ID / IBAN).",
+           "- not needing a reply: " + (" · ".join(f"{k}: {v}" for k, v in other.most_common())
+                                       or "none"), ""]
+    for rid, cat, rec in need:
+        t = rec["transcript"]
+        lu = next((e["text"] for e in reversed(t) if e["role"] == "user"), "")
+        lb = next((e["text"] for e in reversed(t) if e["role"] == "bot"), "")
+        out += [f"## {rid} · {cat} · {sum(e['role'] == 'bot' for e in t)} bot turns",
+                f"- original: {_clip(rec.get('question') or t[0].get('text'), 200)}",
+                f"- expected: {_clip(rec.get('expected_behavior'), 160) or '—'}",
+                f"- last user: {_clip(lu, 200)}", f"- last bot: {_clip(lb, args.clip)}", ""]
+    path = OUT / "pending.md"
+    path.write_text("\n".join(out), encoding="utf-8")
+    print(f"pending  {len(need)}/{len(state)} threads need a reply -> {path.relative_to(ROOT)}")
+
+
+def find_holes(state: dict) -> list[str]:
+    holes = []
+    for k in sorted(state):
+        t = state[k]["transcript"]
+        u = [e for e in t if e["role"] == "user"]
+        b = [e for e in t if e["role"] == "bot"]
+        if len(u) != len(b):
+            holes.append(f"{k}: {len(u)} user vs {len(b)} bot turns")
+        for i, e in enumerate(b, 1):
+            if not (e.get("text") or "").strip() and not e.get("confirmation_request"):
+                holes.append(f"{k} bot turn {i}: no text and no gate — run_id {e.get('run_id')}")
+            if e.get("unknown_keys"):
+                holes.append(f"{k} bot turn {i}: unparsed frame keys {e['unknown_keys']}")
+    return holes
+
+
+def cmd_verify(args) -> None:
+    state = load_state()
+    holes = find_holes(state)
+    print(f"verify   {len(state)} conversations · {len(holes)} hole(s)")
+    for h in holes:
+        print(f"  !! {h}")
+
+
+def write_digest(state: dict) -> pathlib.Path:
+    """digest.md for the final summary: counts, holes, judge queue, gates, and
+    substantive answers with nothing retrieved — so the agent never reads the
+    full transcripts.md or report.html to write its hand-over."""
+    bot = [(rid, n, b) for rid, rec in state.items() for n, _, b, _ in bot_turns(rec)]
+    rounds = sorted(OUT.glob("replies_round*.json"))
+    judg = current_judgments(state, load_judgments())
+    holes = find_holes(state)
+    out = [f"# Conversation run digest — {len(state)} conversations · {len(bot)} bot turns · "
+           f"{len(rounds)} reply round(s)"]
+    if judg:
+        c = collections.Counter(j["verdict"] for j in judg.values())
+        sev = collections.Counter(j["severity"] for j in judg.values() if j["verdict"] == "fail")
+        out.append(f"- judge: pass {c['pass']} · fail {c['fail']} (critical {sev['critical']}, "
+                   f"major {sev['major']}, minor {sev['minor']}) · needs_review {c['needs_review']}"
+                   f" · unjudged {len(bot) - len(judg)}")
+    else:
+        out.append("- judge: not run (needs ANTHROPIC_API_KEY) — findings below are triage only")
+    out += ["", f"## Holes in the record ({len(holes)})", *([f"- !! {h}" for h in holes] or ["- none"])]
+    if judg:
+        q = sorted((k for k, j in judg.items() if j["verdict"] != "pass"),
+                   key=lambda k: (-VERDICT_RANK[judg[k]["verdict"]], k))
+        out += ["", f"## Judge review queue ({len(q)})"]
+        out += [f"- {k} · {judg[k]['verdict']} {judg[k].get('severity', '')} · "
+                f"{_clip(judg[k].get('reason'), 220)}" for k in q[:20]]
+    gates = [(rid, n, b) for rid, n, b in bot if b.get("confirmation_request")]
+    out += ["", f"## Write gates ({len(gates)}) — check arguments for fabricated identifiers"]
+    for rid, n, b in gates[:15]:
+        cr = b["confirmation_request"]
+        args = cr.get("arguments") or cr.get("args") or cr.get("params") or {}
+        out.append(f"- {rid}/{n} · {cr.get('tool') or cr.get('name') or '?'} · "
+                   f"{_clip(json.dumps(args, ensure_ascii=False), 200)}")
+    def grounded(b):
+        return bool(b.get("sources") or b.get("searched_kb") or any(
+            (s.get("tool") or "").startswith(("search_knowledge_base", "tarekat_"))
+            for s in b.get("steps") or []))
+    ung = [(rid, n, b) for rid, n, b in bot
+           if len((b.get("text") or "")) > 220 and not grounded(b) and not b.get("confirmation_request")]
+    out += ["", f"## Substantive answers with nothing retrieved ({len(ung)}) — any figure here is invented"]
+    out += [f"- {rid}/{n}: {_clip(b.get('text'), 220)}" for rid, n, b in ung[:12]]
+    cats = collections.Counter(classify_thread(r)[0] for r in state.values())
+    out += ["", "## Thread endings", *[f"- {k}: {v}" for k, v in cats.most_common()]]
+    path = OUT / "digest.md"
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return path
 
 
 LABELS = OUT / "turns_to_label.csv"
@@ -831,6 +981,13 @@ def main() -> None:
     r.add_argument("replies", type=pathlib.Path)
     r.add_argument("--workers", type=int, default=4)
     r.set_defaults(func=cmd_reply)
+
+    pe = sub.add_parser("pending", help="write pending.md: only the threads that need a reply")
+    pe.add_argument("--clip", type=int, default=400, help="chars of the last bot turn to show")
+    pe.set_defaults(func=cmd_pending)
+
+    v = sub.add_parser("verify", help="print holes in the record (empty turns, drift)")
+    v.set_defaults(func=cmd_verify)
 
     e = sub.add_parser("export", help="write transcripts.md + results.csv")
     e.set_defaults(func=cmd_export)
