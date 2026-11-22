@@ -29,7 +29,6 @@ n=0
 while IFS= read -r q; do
   [ -z "$q" ] && continue
   n=$((n+1))
-  printf '  %2d. %s\n' "$n" "${q:0:60}"
 
   playwright-cli -s="$SESSION" goto "$BASE/dashboard/agents/$AGENT?tab=test" >/dev/null 2>&1
   sleep "$HYDRATE"
@@ -40,7 +39,7 @@ while IFS= read -r q; do
   val=$(playwright-cli -s="$SESSION" --raw eval \
         "() => document.querySelector(\"input[placeholder='Ask something to test…']\")?.value || ''" 2>/dev/null)
   if [ "${#val}" -lt 3 ]; then
-    echo "      input did not take — waiting and retrying"
+    echo "  !! q$n: input did not take — waiting and retrying"
     sleep "$HYDRATE"
     playwright-cli -s="$SESSION" fill "input[placeholder='Ask something to test…']" "$q" >/dev/null 2>&1
   fi

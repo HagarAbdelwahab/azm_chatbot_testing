@@ -174,6 +174,47 @@ def card(i, r):
 </div>"""
 
 
+# ---- agent digest ---------------------------------------------------------------
+# digest.md: everything the summary needs, masked and clipped, so the agent never
+# reads the full results JSON or report.html.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))   # repo root
+try:
+    from tools.render_replay_html import mask
+except Exception:                       # renderer moved — never block the report on it
+    def mask(t):
+        return t
+
+
+def _clip(t, n):
+    t = " ".join(mask(t or "").split())
+    return t if len(t) <= n else t[:n] + "…"
+
+
+def write_digest(path, meta, results, held, notiso, nosrc):
+    out = [f"# Studio playground digest — {meta.get('agent') or '?'} ({meta.get('agent_id')})",
+           f"- tenant {meta.get('tenant') or '?'} · KB {meta.get('knowledge_base') or 'not captured'}"
+           f" · model {_clip(meta.get('model'), 60) or 'not captured'}",
+           "- PLAYGROUND: ignores rollout %, not saved, not billed — not production behaviour",
+           f"- questions {len(results)} · isolated {len(results) - notiso}"
+           f" · withheld/empty {held} · answered with 0 sources {nosrc}"]
+    if notiso:
+        out.append(f"- !! {notiso} NOT isolated — those answers carry earlier context")
+    for i, r in enumerate(results, 1):
+        a = r.get("answer") or ""
+        flags = [f for f, on in (
+            ("NOT-ISOLATED", (r.get("question") or "").strip() != (r.get("asked") or "").strip()),
+            ("withheld", "Withheld" in a or not a.strip()),
+            ("0-sources", a.strip() and "Withheld" not in a and not r.get("sources")),
+            ("extract-error", r.get("error"))) if on]
+        out += [f"\n## {i}. {', '.join(flags) or 'answered'} · sources: "
+                f"{', '.join(r.get('sources') or []) or 'none'} · quality {r.get('quality') or '—'}"
+                f" · faithfulness {r.get('faithfulness') or '—'}"
+                f"{' · tools: ' + ', '.join(r['tools']) if r.get('tools') else ''}",
+                f"- asked: {_clip(r.get('asked'), 180)}",
+                f"- answer: {_clip(a, 450) or '(empty)'}"]
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit("usage: render_report.py <results.json> [--out DIR]")
@@ -249,7 +290,11 @@ def main():
 </body></html>"""
 
     page_path.write_text(page, encoding="utf-8")
-    print(f"wrote {page_path}  ({page_path.stat().st_size // 1024} KB)")
+    digest = out_dir / "digest.md"
+    write_digest(digest, meta, results, held, notiso, nosrc)
+    print(f"studio   {len(results)} questions · isolated {len(results) - notiso} · "
+          f"withheld {held} · 0-sources {nosrc}" + (" · !! NOT ISOLATED" if notiso else ""))
+    print(f"DIGEST: {digest.resolve()}")
     print(f"REPORT URL: {page_path.resolve().as_uri()}")
 
 
