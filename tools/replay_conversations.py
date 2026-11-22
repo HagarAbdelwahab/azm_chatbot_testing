@@ -133,9 +133,10 @@ def replay_one(client: AgentClient, conv: dict, state: dict, state_file: Path) -
     with _lock:
         state[pid] = rec
         state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    flag = "ERR " if rec["error"] else ""
-    print(f"  {flag}{pid[:8]} -> {rec.get('replay_conversation_id','-')[:8]} "
-          f"({len(rec['turns'])}/{len(conv['user_turns'])} turns)")
+    # Successes stay silent (130 lines on a full day is pure context cost); errors print.
+    if rec["error"] or len(rec["turns"]) < len(conv["user_turns"]):
+        print(f"  ERR {pid[:8]} -> {rec.get('replay_conversation_id','-')[:8]} "
+              f"({len(rec['turns'])}/{len(conv['user_turns'])} turns)")
 
 
 def main() -> None:
