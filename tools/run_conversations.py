@@ -48,6 +48,27 @@ from agent_client import AgentClient  # noqa: E402
 OUT = ROOT / "reports" / "conversations"
 STATE = OUT / "state.json"
 
+# Which widget the run talks to. Default: AGENT_API_KEY from .env (agent_client's own
+# default). --ops logs in to the ops portal once, reads the Tarekat ops portal widget's
+# public key + API base off the page (as the browser does) and runs ANONYMOUSLY through
+# that bot — no user token, so nothing expires mid-run. Set by main().
+_CLIENT_KW: dict = {}
+
+
+def make_client(timeout: float) -> AgentClient:
+    return AgentClient(timeout=timeout, **_CLIENT_KW)
+
+
+def use_ops_widget(portal: str | None = None) -> None:
+    """Point every client at the ops portal widget, and prove it writes to testing."""
+    from tools.ops_session import OpsUserSession
+    from tools.replay_conversations import assert_replay_target
+    with OpsUserSession(portal) as s:
+        _CLIENT_KW.update(origin=s.portal, api_key=s.widget_key, base_url=s.studio_api)
+    with make_client(60) as c:
+        probe = assert_replay_target(c, "testing")
+    print(f"target     ops portal widget -> testing (probe {probe[:8]})")
+
 
 # ---------------------------------------------------------------- state
 
@@ -200,7 +221,7 @@ def read_csv(path: pathlib.Path) -> list[dict]:
 
 def ask_one(row: dict) -> tuple[str, dict]:
     cid = row.get("id") or row["question"][:20]
-    with AgentClient(timeout=120) as c:
+    with make_client(120) as c:
         turn = c.ask(row["question"])
     print(f"  {cid}: {turn.total_ms}ms  tools={[s.get('tool') for s in turn.steps] or '—'}  "
           f"abstain={turn.abstention_reason or '—'}", flush=True)
@@ -241,7 +262,7 @@ def run_scenario(sc: dict) -> tuple[str, dict]:
     sent regardless of what the bot replies, so the script stays comparable across runs.
     """
     sid = sc["id"]
-    client = AgentClient(timeout=180)
+    client = make_client(180)
     transcript: list[dict] = []
     cid = ""
     try:
@@ -352,7 +373,7 @@ def cmd_deepen(args) -> None:
         cid, steps = item
         rec = state[cid]
         opening = next(e["text"] for e in rec["transcript"] if e["role"] == "user")
-        client = AgentClient(timeout=120)
+        client = make_client(120)
         try:
             for step in steps:
                 msg = opening if step.get("repeat_opening") else step["text"]
@@ -392,7 +413,7 @@ def cmd_reply(args) -> None:
         if isinstance(messages, str):
             messages = [messages]
         record = state[cid]
-        client = AgentClient(timeout=180)
+        client = make_client(180)
         try:
             for msg in messages:
                 # One slow turn must not discard the whole round — every turn that
@@ -781,6 +802,10 @@ def cmd_archive(args) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--ops", action="store_true",
+                    help="talk to the Tarekat ops portal widget (testing) instead of the "
+                         "AGENT_API_KEY bot; logs in once with OPS_USERNAME/OPS_PASSWORD")
+    ap.add_argument("--portal", help="ops portal URL (default OPS_PORTAL)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     a = sub.add_parser("ask", help="send each CSV question in its own conversation")
@@ -825,6 +850,8 @@ def main() -> None:
     ar.set_defaults(func=cmd_archive)
 
     args = ap.parse_args()
+    if args.ops and args.cmd in ("ask", "scenario", "deepen", "reply"):
+        use_ops_widget(args.portal)
     args.func(args)
 
 
