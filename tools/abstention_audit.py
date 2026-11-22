@@ -638,6 +638,58 @@ def render(meta: dict, stats: dict, convs: list[dict], phrase: str,
 
 # ---- cli ---------------------------------------------------------------------
 
+DIGEST_KEYS = ("model", "knowledge_base_ids", "min_score_to_answer",
+               "faithfulness_threshold", "strict_grounding", "relevance_threshold")
+
+
+def write_digest(meta: dict, stats: dict, failures: list, path: Path,
+                 top_n: int = 15) -> None:
+    """Small, masked summary.md — everything the agent needs to report, so it never
+    has to open audit.json (raw, unmasked, ~400 KB) or report.html (~200 KB)."""
+    w = meta["window"]
+    s = stats
+    lines = [
+        f"# Abstention audit — {meta['tenant']} — {meta['label']}",
+        f"window: {w['start']} .. {w['end']} (UTC) · phrase: `{meta['phrase']}`"
+        + (" · MATCHED-ONLY scan (no turn-level rate)" if meta["matched_only"] else ""),
+        "",
+        f"- conversations: {s['convs_with_abstention']} of {s['total_in_window']} "
+        f"({pct(s['conv_rate'])}) · scanned {s['scanned']}",
+        f"- bot turns: {s['abstention_msgs']}"
+        + (f" of {s['assistant_msgs_total']} ({pct(s['turn_rate'])})"
+           if s["turn_rate"] is not None else " (no denominator)"),
+        f"- fully abstained {s['fully_abstained']} · ended on a punt {s['dead_end']}"
+        f" · first contact {s['first_contact']} · repeat (>=2) {s['repeat']}",
+        f"- escalated: {s['escalated_among_abstained']} of the abstaining · "
+        f"{s['escalated_overall']} overall",
+    ]
+    if failures:
+        lines.append(f"- !! {len(failures)} transcript fetch(es) FAILED — counts incomplete")
+
+    # Merge near-duplicate questions (whitespace/punctuation variants) before ranking.
+    merged: Counter = Counter()
+    shown: dict[str, str] = {}
+    for q, n in s["top_triggers"]:
+        k = norm(q)
+        if not k:
+            continue
+        merged[k] += n
+        shown.setdefault(k, q)
+    lines += ["", f"## Top unanswered questions (masked, {len(merged)} distinct)"]
+    for k, n in merged.most_common(top_n):
+        q = " ".join(mask(shown[k]).split())
+        lines.append(f"- {n}× {q[:200]}")
+
+    lines += ["", "## Matched wordings"]
+    lines += [f"- {n}× {' '.join(v.split())[:160]}" for v, n in s["variants"]] or ["- none"]
+
+    agent = (meta.get("config") or {}).get("agent") or {}
+    lines += ["", "## Agent config"]
+    lines += [f"- {k}: {json.dumps(agent[k], ensure_ascii=False)}"
+              for k in DIGEST_KEYS if k in agent] or ["- unavailable"]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Audit a tenant's canned-abstention rate over a time window.")
@@ -731,23 +783,14 @@ def main() -> None:
     report.write_text(render(meta, stats, data["conversations"], args.phrase,
                              args.matched_only), encoding="utf-8")
 
-    print()
-    print(f"scanned  {stats['scanned']} transcript(s) of "
-          f"{stats['total_in_window']} in window")
-    print(f"abstain  {stats['convs_with_abstention']} conversations "
-          f"({pct(stats['conv_rate'])}) · {stats['abstention_msgs']} bot turns"
-          + (f" ({pct(stats['turn_rate'])} of {stats['assistant_msgs_total']})"
-             if stats["turn_rate"] is not None else ""))
-    print(f"severe   {stats['fully_abstained']} fully abstained · "
-          f"{stats['dead_end']} ended on a punt · "
-          f"{stats['first_contact']} failed on first contact")
-    if data["transcript_failures"]:
-        print(f"!! {len(data['transcript_failures'])} transcript fetch(es) FAILED — "
-              f"counts below are incomplete:")
-        for f in data["transcript_failures"][:5]:
-            print(f"   {f}")
-    print()
-    print(f"AUDIT FILE: {out_file}")
+    digest = out_dir / "summary.md"
+    write_digest(meta, stats, data["transcript_failures"], digest)
+
+    fails = len(data["transcript_failures"])
+    print(f"abstain  {stats['convs_with_abstention']}/{stats['total_in_window']} "
+          f"conversations ({pct(stats['conv_rate'])})"
+          + (f" · !! {fails} fetch failures" if fails else ""))
+    print(f"SUMMARY: {digest}")
     print(f"REPORT URL: file://{report}")
 
 
