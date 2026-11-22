@@ -257,8 +257,8 @@ def main() -> None:
     with OpsUserSession(args.portal, args.user, args.password, headless=not args.headed) as s:
         ident = s.current()
         target = tenant_name(ident.tenant_id)
-        print(f"portal     {s.portal}  (logged in; widget state after login: "
-              f"{s.identity_state_after_login})")
+        print(f"portal     {s.portal}  (logged in via {s.login_method}; widget state "
+              f"after login: {s.identity_state_after_login})")
         print(f"user       national id {mask_id(ident.national_id)} -> tenant {target}")
         if ident.tenant_id == TENANTS["restricted"]:
             sys.exit("ABORTED — this portal's widget writes to PRODUCTION (restricted). "

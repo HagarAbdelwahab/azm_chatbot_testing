@@ -44,6 +44,8 @@ from dataclasses import dataclass, field
 import httpx
 from dotenv import load_dotenv
 
+from tools import seeder_login
+
 load_dotenv()
 
 DEFAULT_PORTAL = "https://ops-merath.web.azm-dev.com"
@@ -110,6 +112,8 @@ class OpsUserSession:
         self.widget_key: str | None = None
         self.studio_api: str | None = None
         self.identity_state_after_login: str | None = None
+        self.login_method: str | None = None          # "sso" | "seeder"
+        self.login_fallback_reason: str | None = None  # why SSO was not used, when it was not
         self.logins = 0
         self.exchanges = 0
         self._pw = self._browser = self._page = None
@@ -128,6 +132,38 @@ class OpsUserSession:
         return self
 
     def _login(self) -> None:
+        """SSO first. When SSO fails and the seeder is configured, sign in as an heir
+        seeded with the same national id instead (tools/seeder_login.py). Which path was
+        used is recorded in `login_method`, so a fallback is a finding, never silent."""
+        try:
+            self._login_sso()
+            self.login_method = "sso"
+            return
+        except Exception as sso_err:
+            nid = seeder_login.target_national_id(self.username)
+            if not (seeder_login.configured() and nid):
+                raise RuntimeError(
+                    f"{sso_err} Seeder fallback unavailable: set OPS_ADMIN_URL, OPS_ADMIN_USERNAME, "
+                    f"OPS_ADMIN_PASSWORD and OPS_NATIONAL_ID (10 digits) in .env.") from sso_err
+            print(f"  !! SSO login failed ({str(sso_err)[:90]}) — signing in as heir "
+                  f"{mask_id(nid)} through the inheritance seeder (seeds one case)")
+            self.login_fallback_reason = str(sso_err)[:200]
+            self._login_seeder(nid)
+
+    def _login_seeder(self, nid: str) -> None:
+        old = self._page
+        old.context.clear_cookies()
+        portal = seeder_login.seeder_login(old.context, nid)
+        self._page = portal
+        if old is not portal:
+            try:
+                old.close()
+            except Exception:
+                pass
+        self.login_method = "seeder"
+        self._after_login()
+
+    def _login_sso(self) -> None:
         p = self._page
         # Stale portal cookies make /login bounce straight back to /dashboard (seen
         # 2026-11-17), so a re-login must start from a signed-out browser.
@@ -167,6 +203,10 @@ class OpsUserSession:
         except Exception as e:
             raise RuntimeError(f"SSO login did not reach /dashboard (now at {p.url}). "
                                f"Wrong credentials or the SSO page changed.") from e
+        self._after_login()
+
+    def _after_login(self) -> None:
+        p = self._page
         self._wait_widget()
         self._portal_touched = time.time()
         self.logins += 1
