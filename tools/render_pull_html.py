@@ -251,6 +251,63 @@ applyFilter(); route();
 """
 
 
+# ---- agent digest ------------------------------------------------------------
+# A small masked digest.md so the agent summarising a pull never has to open
+# pull.json (raw, unmasked) or report.html (~4 KB per conversation).
+
+RANK = ["refusal", "no-reply", "handoff", "left-hanging"]
+
+
+def _clip(t: str | None, n: int) -> str:
+    t = " ".join(mask(t or "").split())
+    return t if len(t) <= n else t[:n] + "…"
+
+
+def write_digest(path: Path, day: str, n_convs: int, stats: dict, items: list[dict],
+                 max_convs: int = 15, max_turns: int = 3, clip: int = 260,
+                 max_groups: int = 6) -> None:
+    out = [f"# Production pull digest — {day} (UTC)",
+           f"- conversations {n_convs} · user turns {stats['turns']} · refusal conversations "
+           f"{stats['refusal_convs']} ({stats['refusal_rate']:.0f}%) · handoffs {stats['handoffs']}",
+           "- flags: " + (" · ".join(f"{k}: {v}" for k, v in
+                                     sorted(stats["flags"].items(), key=lambda kv: -kv[1]))
+                          or "none"), ""]
+
+    def rank(it: dict) -> tuple:
+        keys = [t.split("×")[0].split(":")[0] for t in it["tags"]]
+        return (min((RANK.index(k) for k in keys if k in RANK), default=99), -it["refusals"])
+
+    flagged = sorted([it for it in items if it["tags"]], key=rank)
+    out.append(f"## Flagged conversations ({min(len(flagged), max_convs)} of {len(flagged)}; "
+               f"full detail in report.html)")
+    for it in flagged[:max_convs]:
+        out.append(f"\n### #{it['idx']} · {len(it['rows'])} turns · {', '.join(it['tags'])}")
+        rows, last = it["rows"], len(it["rows"]) - 1
+        picked = [i for i, r in enumerate(rows)
+                  if is_refusal(r["bot"]) or (r["user"] and not norm(r["bot"]))]
+        if not picked:                       # handoff / left-hanging: the ending matters
+            picked = [last]
+        for i in picked[:max_turns]:
+            r = rows[i]
+            out += [f"- turn {i + 1}", f"  - user: {_clip(r['user'], 180)}",
+                    f"  - bot: {_clip(r['bot'], clip) or '(no reply)'}"]
+
+    # Same opening question in several conversations: answers side by side, so a
+    # contradiction between conversations shows up without reading every page.
+    groups: dict[str, list[dict]] = {}
+    for it in items:
+        first = next((r for r in it["rows"] if r["user"]), None)
+        if first and len(norm(first["user"])) >= 8:
+            groups.setdefault(norm(first["user"]), []).append((it, first))
+    rep = sorted((g for g in groups.values() if len(g) > 1), key=len, reverse=True)
+    out += ["", f"## Repeated opening questions ({len(rep)} groups) — compare the answers"]
+    for g in rep[:max_groups]:
+        out.append(f"\n- {len(g)}× \"{_clip(g[0][1]['user'], 160)}\"")
+        for it, first in g[:3]:
+            out.append(f"  - #{it['idx']}: {_clip(first['bot'], 200) or '(no reply)'}")
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
 def main() -> None:
     argv = [a for a in sys.argv[1:]]
     if not argv:
@@ -271,7 +328,7 @@ def main() -> None:
     if not convs:
         sys.exit(f"{pull_path} holds no conversations.")
 
-    pages, index_rows = [], []
+    pages, index_rows, digest_items = [], [], []
     flags: dict[str, int] = {}
     turns_total = refusal_convs = handoffs = 0
     for i, conv in enumerate(convs, 1):
@@ -290,6 +347,8 @@ def main() -> None:
             str(conv.get("title") or "(untitled)")
         index_rows.append({"idx": i, "title": mask(opening), "turns": len(rows),
                            "tags": cls["tags"]})
+        digest_items.append({"idx": i, "tags": cls["tags"], "refusals": cls["refusals"],
+                             "rows": rows})
 
     stats = {
         "turns": turns_total,
@@ -336,9 +395,12 @@ def main() -> None:
     out = out_override or (Path("reports/prod_pulls") / day / "report.html")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(doc, encoding="utf-8")
+    digest = out.parent / "digest.md"
+    write_digest(digest, day, len(convs), stats, digest_items)
     print(f"conversations {len(convs)} · user turns {turns_total} · "
           f"refusal conversations {refusal_convs} ({stats['refusal_rate']:.0f}%) · "
           f"handoffs {handoffs}")
+    print(f"DIGEST: {digest.resolve()}")
     print(f"REPORT URL: file://{out.resolve()}")
 
 
