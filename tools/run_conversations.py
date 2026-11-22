@@ -537,7 +537,8 @@ def cmd_export(args) -> None:
 # that need a reply, `verify` prints only holes, and `export` writes digest.md for the
 # final summary. All three are masked and clipped.
 
-SOFT_CLOSE = re.compile(r"هل (يمكنني|أستطيع) مساعدتك (في|ب)\S* (أمر|شيء|شي) (آخر|اخر)|anything else", re.I)
+SOFT_CLOSE = re.compile(r"هل (يمكنني|أستطيع|استطيع) (مساعدتك|أساعدك|اساعدك) (في|ب)\S*\s+(أي\s+)?"
+                        r"(أمر|شيء|شي|استفسار|سؤال|خدمة)\s+(آخر|اخر|أخرى|اخرى)|anything else", re.I)
 ASKS_DATA = re.compile(r"رقم (الطلب|طلب|الهوية|الصك|السجل)|الرقم المرجعي|request number|national id"
                        r"|(زودني|تزويدي|أرسل|ارسل|أدخل|ادخل)\S*\s+(ب|برقم)?", re.I)
 OFFERS = re.compile(r"هل (ترغب|تريد|تود|تودين|ترغبين)|تحب (أن|ان)|would you like|shall i", re.I)
@@ -548,6 +549,15 @@ def _clip(t: str | None, n: int) -> str:
     from tools.render_replay_html import mask
     t = " ".join(mask(t or "").split())
     return t if len(t) <= n else t[:n] + "…"
+
+
+def _head_tail(t: str | None, n: int) -> str:
+    """Start AND end of a reply: the ending is what decides whether it needs an answer."""
+    t = _clip(t, 10**6)
+    if len(t) <= n:
+        return t
+    tail = max(120, n // 3)
+    return t[:n - tail] + " … " + t[-tail:]
 
 
 def classify_thread(rec: dict) -> tuple[str, bool]:
@@ -612,7 +622,7 @@ def cmd_pending(args) -> None:
         out += [f"## {rid} · {cat} · {sum(e['role'] == 'bot' for e in t)} bot turns",
                 f"- original: {_clip(rec.get('question') or t[0].get('text'), 200)}",
                 f"- expected: {_clip(rec.get('expected_behavior'), 160) or '—'}",
-                f"- last user: {_clip(lu, 200)}", f"- last bot: {_clip(lb, args.clip)}", ""]
+                f"- last user: {_clip(lu, 200)}", f"- last bot: {_head_tail(lb, args.clip)}", ""]
     path = OUT / "pending.md"
     path.write_text("\n".join(out), encoding="utf-8")
     print(f"pending  {len(need)}/{len(state)} threads need a reply -> {path.relative_to(ROOT)}")
@@ -684,6 +694,15 @@ def write_digest(state: dict) -> pathlib.Path:
     out += [f"- {rid}/{n}: {_clip(b.get('text'), 220)}" for rid, n, b in ung[:12]]
     cats = collections.Counter(classify_thread(r)[0] for r in state.values())
     out += ["", "## Thread endings", *[f"- {k}: {v}" for k, v in cats.most_common()]]
+    # One line per conversation so findings can be ranked without transcripts.md:
+    # what the sheet expected, how the thread ended, and the most substantive answer.
+    out += ["", "## Expected vs outcome (one line each; open a conversation only to confirm)"]
+    for rid in sorted(state):
+        rec = state[rid]
+        bots = [e for e in rec["transcript"] if e["role"] == "bot"]
+        best = max((e.get("text") or "" for e in bots), key=len, default="")
+        out.append(f"- {rid} · expected {rec.get('expected_behavior') or '—'} · "
+                   f"{classify_thread(rec)[0]} · {len(bots)} turns · {_clip(best, 200)}")
     path = OUT / "digest.md"
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
     return path
