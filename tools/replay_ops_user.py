@@ -317,7 +317,12 @@ def main() -> None:
                 state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2),
                                       encoding="utf-8")
                 ts = rec["turns"]
-                print(f"  {c['prod_conversation_id'][:8]} -> "
+                # Clean conversations stay silent (totals print at the end); only
+                # errors, short runs and identity retries are worth a line.
+                if not (rec["error"] or len(ts) < len(c["user_turns"])
+                        or any(t["identity_retry"] for t in ts)):
+                    continue
+                print(f"  !! {c['prod_conversation_id'][:8]} -> "
                       f"{rec.get('replay_conversation_id', '-')[:8]} "
                       f"({len(ts)}/{len(c['user_turns'])} turns, "
                       f"swapped {len(rec['substitutions'])}, "

@@ -181,6 +181,18 @@ def align(prod_conv: dict, rec: dict) -> list[dict]:
     return rows
 
 
+def grounded(t: dict) -> bool:
+    """Did this replay turn retrieve anything? `sources` is empty since the 2026-09-01
+    contract change, and the agentic flow retrieves through tool calls
+    (search_knowledge_base, tarekat_*) — reading `sources` alone flags almost every
+    agentic answer as ungrounded."""
+    if t.get("sources") or t.get("retrieved_chunks") or t.get("retrieved_contexts"):
+        return True
+    return any((x.get("name") if isinstance(x, dict) else str(x)) == "search_knowledge_base"
+               or str(x.get("name") if isinstance(x, dict) else x).startswith("tarekat_")
+               for x in (t.get("tools") or []))
+
+
 def classify(rows: list[dict], rec: dict, prod_conv: dict) -> dict:
     """Per-conversation change signals, so a reviewer can triage 100 of these."""
     sims, flips = [], []
@@ -212,7 +224,7 @@ def classify(rows: list[dict], rec: dict, prod_conv: dict) -> dict:
         tags.append("weak-retrieval")
     # Only a SUBSTANTIVE answer with no retrieval is a finding. Clarification questions
     # legitimately retrieve nothing, and flagging those buries the real cases.
-    if any(not (r["replay"] or {}).get("sources")
+    if any(not grounded(r["replay"] or {})
            and len(norm((r["replay"] or {}).get("bot") or "")) > 220
            and not (r["replay"] or {}).get("confirmation_request")
            for r in rows if r["replay"]):
@@ -699,6 +711,83 @@ applyFilter(); route();
 """
 
 
+# ---- agent digest ------------------------------------------------------------
+# A small masked digest.md so the agent writing the summary never has to open
+# state.json / pull.json (raw, unmasked) or report.html (~10 KB per conversation).
+
+SEVERITY = ["answered→refused", "ungrounded-answer", "tool-failed", "empty-reply",
+            "confirmation-gate", "replay-error", "incomplete", "refused→answered",
+            "number-not-owned", "asked-about-other-request", "told-to-log-in",
+            "prod-handoff", "weak-retrieval"]
+
+
+def _clip(t: str | None, n: int) -> str:
+    t = " ".join(mask(t or "").split())
+    return t if len(t) <= n else t[:n] + "…"
+
+
+def _turn_signals(r: dict) -> list[str]:
+    rep = r["replay"] or {}
+    bot = rep.get("bot")
+    sig = []
+    if r["prod"] is not None and bot is not None and is_refusal(r["prod"]) != is_refusal(bot):
+        sig.append("refused→answered" if is_refusal(r["prod"]) else "answered→refused")
+    if rep and (bot or "").strip() == "" and not rep.get("confirmation_request"):
+        sig.append("empty-reply")
+    if rep.get("confirmation_request"):
+        sig.append("confirmation-gate")
+    if rep.get("tool_failures"):
+        sig.append("tool-failed")
+    if rep and not grounded(rep) and len(norm(bot or "")) > 220 \
+            and not rep.get("confirmation_request"):
+        sig.append("ungrounded-answer")
+    if isinstance(rep.get("retrieval_score"), (int, float)) and rep["retrieval_score"] < 0.5:
+        sig.append("weak-retrieval")
+    return sig
+
+
+def write_digest(path: Path, meta: dict, stats: dict, convs: list[dict],
+                 max_convs: int = 12, max_turns: int = 3, clip: int = 280) -> None:
+    pa = ((meta.get("prod_config") or {}).get("agent")) or {}
+    ta = ((meta.get("replay_config") or {}).get("agent")) or {}
+    diff = [f"- {k}: {_clip(str(pa.get(k)), 80)} → {_clip(str(ta.get(k)), 80)}"
+            for k in sorted(set(pa) | set(ta)) if pa.get(k) != ta.get(k)]
+    win = meta.get("pull_window") or {}
+    out = [f"# Replay digest — {win.get('day') or win.get('start', '?')} (UTC) · "
+           f"{meta.get('prod_tenant', '?')} → {meta.get('replay_tenant', '?')}",
+           f"- conversations {stats['convs']} · turns {stats['turns']} · mean similarity "
+           f"{stats['avg']} · heavily diverged {stats['low']} · mean answer-quality {stats['qavg']}",
+           f"- flags: {stats['tagline']}", "",
+           f"## Config diff ({len(diff)} fields, prod → testing)", *(diff or ["- none"]), ""]
+
+    def rank(c: dict) -> tuple:
+        hits = [SEVERITY.index(t) for t in c["tags"] if t in SEVERITY]
+        return (min(hits) if hits else 99, c["sim"] if c["sim"] is not None else 1)
+
+    flagged = sorted([c for c in convs if any(t in SEVERITY for t in c["tags"])], key=rank)
+    out.append(f"## Findings shortlist ({min(len(flagged), max_convs)} of {len(flagged)} "
+               f"flagged; full detail in report.html)")
+    for c in flagged[:max_convs]:
+        sim = f"{c['sim']:.0%}" if c["sim"] is not None else "—"
+        out.append(f"\n### #{c['idx']} · alike {sim} · {', '.join(c['tags'])}")
+        shown = 0
+        for r in c["rows"]:
+            sig = _turn_signals(r)
+            if not sig or shown >= max_turns:
+                continue
+            shown += 1
+            out += [f"- turn {r['n']} [{', '.join(sig)}]",
+                    f"  - user: {_clip(r['user'], 160)}",
+                    f"  - prod: {_clip(r['prod'], clip)}",
+                    f"  - test: {_clip((r['replay'] or {}).get('bot'), clip)}"]
+            for tf in ((r["replay"] or {}).get("tool_failures") or [])[:2]:
+                out.append(f"  - tool failure: {_clip(json.dumps(tf, ensure_ascii=False), 160)}")
+    errs = [c for c in convs if "replay-error" in c["tags"]]
+    if errs:
+        out += ["", f"## Replay errors: {len(errs)} — those turns have NO answer"]
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         sys.exit("usage: render_replay_html.py <run-dir>   "
@@ -722,7 +811,7 @@ def main() -> None:
                sorted(state.items(), key=lambda kv: (by_id.get(kv[0], {}).get("created_at") or ""))
                if pid in by_id]
 
-    pages, index_rows, sims, tagcount = [], [], [], {}
+    pages, index_rows, sims, tagcount, digest_rows = [], [], [], {}, []
     for i, (pid, rec) in enumerate(ordered, 1):
         conv = by_id[pid]
         rows = align(conv, rec)
@@ -736,6 +825,8 @@ def main() -> None:
             str(conv.get("title") or "(untitled)")
         index_rows.append({"idx": i, "title": mask(opening), "turns": len(rows),
                            "sim": cls["similarity"], "tags": cls["tags"]})
+        digest_rows.append({"idx": i, "sim": cls["similarity"], "tags": cls["tags"],
+                            "rows": rows})
 
     n_turns = sum(len(r.get("turns") or []) for r in state.values())
     q = [t["answer_quality_score"] for r in state.values() for t in (r.get("turns") or [])
@@ -797,10 +888,11 @@ def main() -> None:
 
     out = run_dir / "report.html"
     out.write_text(page, encoding="utf-8")
-    print(f"pages: {len(pages)} conversations + 1 overview | turns: {n_turns} | "
-          f"mean similarity: {stats['avg']}")
-    if tagcount:
-        print("flags:", stats["tagline"])
+    digest = run_dir / "digest.md"
+    write_digest(digest, meta, stats, digest_rows)
+    print(f"rendered {len(pages)} conversations / {n_turns} turns · mean similarity "
+          f"{stats['avg']} · {sum(1 for r in digest_rows if r['tags'])} flagged")
+    print(f"DIGEST: {digest}")
     print(f"REPORT URL: {out.as_uri()}")
 
 
