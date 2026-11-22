@@ -624,6 +624,65 @@ def render(meta: dict, stats: dict, convs: list[dict], cross: dict | None) -> st
 
 # ---- main --------------------------------------------------------------------
 
+def write_summary(path: Path, meta: dict, stats: dict, convs: list[dict],
+                  cross: dict | None, failures: int, top: int = 8) -> None:
+    """Small masked summary.md — everything Step 4 needs, so the agent never opens
+    report.html (MBs for a week) or audit.json (raw, unmasked transcripts)."""
+    s = stats
+
+    def last_citizen(c: dict) -> str:
+        t = next((m["content"] for m in reversed(c["messages"]) if m["role"] == "user"), "")
+        t = " ".join(mask(t).split())
+        return t[:140] + ("…" if len(t) > 140 else "")
+
+    out = [f"# Handoff audit — {meta['tenant']} — {meta['window']}",
+           f"window: {meta['start']} .. {meta['end']} (UTC)", "",
+           "## Experience (lead with these)",
+           f"- expired (`timeout`, nobody came): {s['expired']} "
+           f"({s['expired_rate']*100:.0f}% of handoffs)",
+           f"- never answered by a human: {s['never_answered']} of "
+           f"{s['handoff_conversations']} (wider than expired)",
+           f"- of those, measurable gap to last message: n={s['abandoned_wait_n']}, "
+           f"median {dur(s['abandoned_wait_median'])}", "",
+           "## Volume and timing (derived; see references/measurement.md for bias)",
+           f"- handoffs: {s['handoff_conversations']} of {s['total_in_window']} "
+           f"conversations ({s['handoff_rate']*100:.1f}%)",
+           f"- wait to first human reply: median {dur(s['wait_median'])} · avg "
+           f"{dur(s['wait_avg'])} · p90 {dur(s['wait_p90'])} · max {dur(s['wait_max'])} "
+           f"(n={s['wait_n']})",
+           f"- duration request→last ops msg: median {dur(s['span_median'])} · avg "
+           f"{dur(s['span_avg'])} · max {dur(s['span_max'])} (n={s['span_n']})",
+           "- resolution: " + " · ".join(f"{k}: {v}" for k, v in
+                                         sorted(s["by_resolution"].items(), key=lambda kv: -kv[1]))]
+    warns = []
+    if failures:
+        warns.append(f"{failures} transcript(s) failed to fetch — counts incomplete")
+    if s["expired_with_reply"]:
+        warns.append(f"{s['expired_with_reply']} 'timeout' conversation(s) HAVE an ops "
+                     f"reply — re-check what timeout means before quoting expiries")
+    if warns:
+        out += ["", "## WARNINGS", *[f"- !! {w}" for w in warns]]
+    if cross:
+        out += ["", f"## Platform cross-check (/analytics/handoff/stats, rolling "
+                    f"days={cross.get('days')} from now — not the same window)",
+                f"- total_handoffs {cross.get('total_handoffs', '—')} · avg_wait "
+                f"{dur(cross.get('avg_wait_seconds'))} · avg_resolution "
+                f"{dur(cross.get('avg_resolution_seconds'))} · resolution_rate "
+                f"{(cross.get('resolution_rate') or 0)*100:.0f}% · return_to_ai_rate "
+                f"{(cross.get('return_to_ai_rate') or 0)*100:.0f}%"]
+    slow = sorted((c for c in convs if c["wait_seconds"] is not None),
+                  key=lambda c: -c["wait_seconds"])[:top]
+    out += ["", f"## Slowest first replies (top {len(slow)})"]
+    out += [f"- {c['conversation_id'][:8]} · wait {dur(c['wait_seconds'])} · "
+            f"{c['resolution']}" for c in slow]
+    never = [c for c in convs if not c["answered"]]
+    out += ["", f"## Never answered ({min(len(never), top)} of {len(never)}; last citizen message, masked)"]
+    out += [f"- {c['conversation_id'][:8]} · {c['resolution']}"
+            f"{' · earlier-cycle' if c['earlier_cycle'] else ''} · \"{last_citizen(c)}\""
+            for c in never[:top]]
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Audit handoff wait, duration and expiry for a tenant/window.")
@@ -709,20 +768,18 @@ def main() -> None:
                         "conversations": data["conversations"]},
                        ensure_ascii=False, indent=1), encoding="utf-8")
 
-    if data["transcript_failures"]:
-        print(f"WARN     {len(data['transcript_failures'])} transcript(s) failed to fetch")
-    if stats["expired_with_reply"]:
-        print(f"WARN     {stats['expired_with_reply']} 'timeout' conversation(s) DO have "
-              f"an ops reply — re-check what timeout means before quoting expiries")
+    if cross is not None:
+        cross = {**cross, "days": args.days or 1}
+    summary = out / "summary.md"
+    write_summary(summary, meta, stats, data["conversations"], cross,
+                  len(data["transcript_failures"]))
 
-    print(f"handoffs {stats['handoff_conversations']} of {stats['total_in_window']} "
-          f"conversations ({stats['handoff_rate']*100:.1f}%)")
-    print(f"wait     median {dur(stats['wait_median'])} · "
-          f"p90 {dur(stats['wait_p90'])} · max {dur(stats['wait_max'])} "
-          f"(n={stats['wait_n']})")
-    print(f"duration median {dur(stats['span_median'])} (n={stats['span_n']})")
-    print(f"expired  {stats['expired']} ({stats['expired_rate']*100:.0f}% of handoffs) · "
-          f"never answered at all {stats['never_answered']}")
+    if data["transcript_failures"] or stats["expired_with_reply"]:
+        print("WARN     see WARNINGS in summary.md before quoting numbers")
+    print(f"handoffs {stats['handoff_conversations']}/{stats['total_in_window']} · "
+          f"expired {stats['expired']} · never answered {stats['never_answered']} · "
+          f"median wait {dur(stats['wait_median'])}")
+    print(f"SUMMARY: {summary}")
     print(f"REPORT URL: file://{report}")
 
 
