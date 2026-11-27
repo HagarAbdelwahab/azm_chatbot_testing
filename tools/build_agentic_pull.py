@@ -8,6 +8,7 @@ Conversations whose `turns` are empty are skipped. Nothing is sent anywhere.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,9 @@ OUT = ROOT / "data" / "prod_pulls" / "testing" / "agentic" / "pull.json"
 
 def build(src: Path) -> dict:
     spec = json.loads(src.read_text(encoding="utf-8"))
+    login_nid = str((spec.get("login_user") or {}).get("national_id") or "").strip()
+    if login_nid and not re.fullmatch(r"[12]\d{9}", login_nid):
+        sys.exit("login_user.national_id must be a 10-digit id starting with 1 or 2 (or empty).")
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     convs, seen = [], set()
     for c in spec.get("conversations", []):
@@ -40,7 +44,7 @@ def build(src: Path) -> dict:
     return {
         "pulled_at": now, "tenant": "authored", "tenant_id": None,
         "window": {"start": now, "end": now, "day": "agentic", "timezone": "UTC"},
-        "selection": {"source": src.name}, "found_in_window": len(convs), "kept": len(convs),
+        "selection": {"source": src.name, "login_national_id": login_nid or None}, "found_in_window": len(convs), "kept": len(convs),
         "skipped_below_min_turns": 0, "transcript_failures": 0, "prod_config": {},
         "conversations": convs,
     }
@@ -55,6 +59,7 @@ def main() -> None:
     OUT.write_text(json.dumps(pull, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"wrote {OUT.relative_to(ROOT)}  ({len(pull['conversations'])} conversations)")
     print(f"NEXT: .venv/bin/python tools/replay_ops_user.py {OUT.relative_to(ROOT)} --rules")
+    print("      (edited conversations are replayed again automatically; --fresh redoes all)")
 
 
 if __name__ == "__main__":

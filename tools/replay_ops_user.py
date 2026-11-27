@@ -32,6 +32,7 @@ before anything is sent. The production tenant is refused outright.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -149,6 +150,12 @@ def substitute_requests(conv: dict, pool: dict[str, list[str]], seed: int):
     return out, subs
 
 
+def source_hash(conv: dict) -> str:
+    """Fingerprint of the turns as written, so an edited conversation is replayed again."""
+    return hashlib.sha256(json.dumps(conv["user_turns"], ensure_ascii=False)
+                          .encode("utf-8")).hexdigest()[:16]
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -182,7 +189,8 @@ def ask_as_user(client: AgentClient, session: OpsUserSession, cid: str, msg: str
 def replay_conv(client, session, conv, own: set[str], swap) -> dict:
     pid = conv["prod_conversation_id"]
     sent, subs, case = swap(conv)
-    rec = {"prod_conversation_id": pid, "user_turns": sent, "substitutions": subs,
+    rec = {"prod_conversation_id": pid, "source_hash": source_hash(conv),
+           "user_turns": sent, "substitutions": subs,
            "ops_case": case, "turns": [], "error": None}
     try:
         cid = client.new_conversation()
@@ -251,10 +259,26 @@ def main() -> None:
     if args.redo_failed:
         state = {k: v for k, v in state.items() if not v.get("error")
                  and not any(x.get("turn_error") for x in v.get("turns") or [])}
-    todo = [c for c in convs if c["prod_conversation_id"] not in state]
+    authored = pull.get("tenant") == "authored"
+
+    def done(c: dict) -> bool:
+        rec = state.get(c["prod_conversation_id"])
+        if rec is None:
+            return False
+        # Production pulls never change; hand-written turns do. Older records carry no
+        # hash: for an authored set they are treated as stale and replayed once.
+        h = rec.get("source_hash")
+        return h == source_hash(c) if (h or authored) else True
+
+    todo = [c for c in convs if not done(c)]
+    stale = sum(1 for c in convs if c["prod_conversation_id"] in state and not done(c))
+    if stale:
+        print(f"changed    {stale} conversations edited since the last run — replaying them again")
+    login_nid = (pull.get("selection") or {}).get("login_national_id") or None
 
     started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    with OpsUserSession(args.portal, args.user, args.password, headless=not args.headed) as s:
+    with OpsUserSession(args.portal, args.user, args.password, headless=not args.headed,
+                        national_id=login_nid) as s:
         ident = s.current()
         target = tenant_name(ident.tenant_id)
         print(f"portal     {s.portal}  (logged in via {s.login_method}; widget state "
@@ -266,6 +290,10 @@ def main() -> None:
         if not ident.national_id:
             sys.exit("ABORTED — the exchanged token carries no verified national id; the "
                      "chat would not be federated. Nothing was sent.")
+        if login_nid and ident.national_id != login_nid:
+            print(f"  !! signed in as {mask_id(ident.national_id)}, not the question set's "
+                  f"login_user {mask_id(login_nid)} (SSO logs in as OPS_USERNAME; "
+                  f"login_user only applies to the seeder fallback)")
 
         own_rows = s.own_request_numbers()
         own = {r["request_number"] for r in own_rows}
@@ -329,6 +357,11 @@ def main() -> None:
                       f"tools {sum(len(t['tarekat_tools']) for t in ts)}, "
                       f"retries {sum(1 for t in ts if t['identity_retry'])})")
         logins, exchanges, after_login = s.logins, s.exchanges, s.identity_state_after_login
+        login_method, fallback_reason = s.login_method, s.login_fallback_reason
+        seeder_cases = s.seeder_cases
+    if seeder_cases > 1:
+        print(f"  !! {seeder_cases} cases seeded this run — the heir's requests changed mid-run, "
+              f"so 'numbers_not_owned' may flag correct answers on later conversations")
 
     # Snapshot the bot the replay actually ran on (the ops widget's), not the pull's
     # bot: a conversation record carries no bot id, its summary does.
@@ -348,9 +381,13 @@ def main() -> None:
         "pull_file": str(pull_file), "pull_window": w,
         "prod_tenant": pull["tenant"], "prod_config": pull.get("prod_config", {}),
         "replay_tenant": target, "replay_config": cfg,
-        "labels": {"source": f"Production · {pull['tenant']}",
-                   "replay": "Ops · signed-in user (request no. swapped)",
-                   "title": "Production phrasing on ops as a signed-in user"},
+        "labels": ({"source": "Expected (authored)",
+                    "replay": "Ops · signed-in user",
+                    "title": "Hand-written agentic questions on ops as a signed-in user"}
+                   if authored else
+                   {"source": f"Production · {pull['tenant']}",
+                    "replay": "Ops · signed-in user (request no. swapped)",
+                    "title": "Production phrasing on ops as a signed-in user"}),
         "substitution_rule": ("request numbers only, by pattern" if args.numbers_only else
                               "ids, phones, IBANs, deed/request/ticket/invoice numbers by "
                               "shape and keywords (no Claude); names NOT swapped"
@@ -359,8 +396,12 @@ def main() -> None:
                               "the ops user's own case data; synthetic same-shape values where "
                               "the ops user has none"),
         "surface": f"ops portal widget, federated as national id {mask_id(ident.national_id)} "
-                   f"(SSO login in a real browser; X-API-Key + Bearer user token)",
+                   + ("(SSO login in a real browser" if login_method == "sso" else
+                      f"(LOGGED IN VIA SEEDER — SSO failed: {fallback_reason or '?'}")
+                   + "; X-API-Key + Bearer user token)",
         "identity": {"national_id": mask_id(ident.national_id), "own_requests": len(own),
+                     "login_method": login_method, "login_fallback_reason": fallback_reason,
+                     "seeder_cases": seeder_cases,
                      "widget_state_after_login": after_login, "logins": logins,
                      "token_exchanges": exchanges},
         "conversations_requested": len(convs),

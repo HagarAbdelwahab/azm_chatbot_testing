@@ -98,7 +98,7 @@ class Identity:
 class OpsUserSession:
     def __init__(self, portal: str | None = None, username: str | None = None,
                  password: str | None = None, headless: bool = True,
-                 refresh_after_s: int = 8 * 60):
+                 refresh_after_s: int = 8 * 60, national_id: str | None = None):
         self.portal = (portal or os.environ.get("OPS_PORTAL") or DEFAULT_PORTAL).rstrip("/")
         self.username = username or os.environ.get("OPS_USERNAME")
         self.password = password or os.environ.get("OPS_PASSWORD")
@@ -106,6 +106,8 @@ class OpsUserSession:
             raise RuntimeError("OPS_USERNAME / OPS_PASSWORD missing — pass --user/--password "
                                "or add them to .env (never commit them).")
         self.headless = headless
+        # Heir to sign in as when SSO fails (seeder fallback); None -> OPS_NATIONAL_ID / username.
+        self.national_id = national_id
         # The chat JWT the studio may forward to the tools lives 10 minutes; re-exchange
         # well inside that so a tool call never runs on an expired user token.
         self.refresh_after_s = refresh_after_s
@@ -114,6 +116,8 @@ class OpsUserSession:
         self.identity_state_after_login: str | None = None
         self.login_method: str | None = None          # "sso" | "seeder"
         self.login_fallback_reason: str | None = None  # why SSO was not used, when it was not
+        self._seeder_href: str | None = None           # Login-as-User link of the seeded heir
+        self.seeder_cases = 0                          # cases seeded this run (>1 = identity drift)
         self.logins = 0
         self.exchanges = 0
         self._pw = self._browser = self._page = None
@@ -132,28 +136,40 @@ class OpsUserSession:
         return self
 
     def _login(self) -> None:
-        """SSO first. When SSO fails and the seeder is configured, sign in as an heir
-        seeded with the same national id instead (tools/seeder_login.py). Which path was
-        used is recorded in `login_method`, so a fallback is a finding, never silent."""
+        """Log in by whatever works, so a run is never blocked by one broken path:
+        the seeded heir's Login-as-User link (after a seeder login), then SSO, then the
+        inheritance seeder (tools/seeder_login.py). `login_method` records the path used,
+        so a fallback is a finding, never silent. Only errors of the SSO login step itself
+        trigger the fallback: a missing widget after a good login is raised as-is.
+        Re-seeding is the last resort: it means a NEW case, so `seeder_cases` counts it."""
+        if self.login_method == "seeder" and self._seeder_href:
+            try:
+                self._page.goto(self._seeder_href, wait_until="networkidle")
+                self._after_login()
+                return
+            except Exception as e:
+                print(f"  !! re-login via the seeded heir's link failed ({str(e)[:90]}) — trying SSO")
         try:
             self._login_sso()
-            self.login_method = "sso"
-            return
         except Exception as sso_err:
-            nid = seeder_login.target_national_id(self.username)
+            nid = seeder_login.target_national_id(self.username, self.national_id)
             if not (seeder_login.configured() and nid):
                 raise RuntimeError(
                     f"{sso_err} Seeder fallback unavailable: set OPS_ADMIN_URL, OPS_ADMIN_USERNAME, "
                     f"OPS_ADMIN_PASSWORD and OPS_NATIONAL_ID (10 digits) in .env.") from sso_err
             print(f"  !! SSO login failed ({str(sso_err)[:90]}) — signing in as heir "
-                  f"{mask_id(nid)} through the inheritance seeder (seeds one case)")
+                  f"{mask_id(nid)} through the inheritance seeder (seeds one case"
+                  f"{'; NOT the first this run' if self.seeder_cases else ''})")
             self.login_fallback_reason = str(sso_err)[:200]
             self._login_seeder(nid)
+            return
+        self.login_method = "sso"
+        self._after_login()
 
     def _login_seeder(self, nid: str) -> None:
         old = self._page
         old.context.clear_cookies()
-        portal = seeder_login.seeder_login(old.context, nid)
+        portal, self._seeder_href = seeder_login.seeder_login(old.context, nid, portal=self.portal)
         self._page = portal
         if old is not portal:
             try:
@@ -161,6 +177,7 @@ class OpsUserSession:
             except Exception:
                 pass
         self.login_method = "seeder"
+        self.seeder_cases += 1
         self._after_login()
 
     def _login_sso(self) -> None:
@@ -203,7 +220,6 @@ class OpsUserSession:
         except Exception as e:
             raise RuntimeError(f"SSO login did not reach /dashboard (now at {p.url}). "
                                f"Wrong credentials or the SSO page changed.") from e
-        self._after_login()
 
     def _after_login(self) -> None:
         p = self._page
