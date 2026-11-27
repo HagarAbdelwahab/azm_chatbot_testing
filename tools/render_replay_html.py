@@ -169,6 +169,8 @@ def align(prod_conv: dict, rec: dict) -> list[dict]:
     rows = []
     for n in range(max(len(prod_pairs), len(replay_turns))):
         user_p, prod_bot = prod_pairs[n] if n < len(prod_pairs) else ("", None)
+        if prod_conv.get("authored"):
+            prod_bot = None          # hand-written: there is no production answer to compare
         rt = replay_turns[n] if n < len(replay_turns) else None
         rows.append({
             "n": n + 1,
@@ -379,9 +381,16 @@ def conv_page(idx: int, prod_conv: dict, rec: dict, rows: list[dict], cls: dict,
                 f'production script, sent unchanged; read the comparison with that in mind.</p>'
                 if r.get("misaligned") else "")
 
-        prod_html = (f'<div class="ans" dir="{direction(r["prod"])}">{rich(r["prod"])}</div>'
-                     if r["prod"] is not None
-                     else '<div class="ans missing">— no production reply recorded —</div>')
+        expect = (prod_conv.get("authored") or {}).get("expect")
+        if prod_conv.get("authored"):
+            prod_html = (f'<div class="ans" dir="{direction(expect)}">{rich(expect)}</div>'
+                         if expect and r["n"] == 1
+                         else '<div class="ans missing">— see turn 1 —</div>' if expect
+                         else '<div class="ans missing">— no expectation written —</div>')
+        elif r["prod"] is not None:
+            prod_html = f'<div class="ans" dir="{direction(r["prod"])}">{rich(r["prod"])}</div>'
+        else:
+            prod_html = '<div class="ans missing">— no production reply recorded —</div>'
         if rt is None:
             rep_html = '<div class="ans missing">— not replayed (run stopped or errored) —</div>'
         else:

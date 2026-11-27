@@ -556,7 +556,7 @@ def _head_tail(t: str | None, n: int) -> str:
     t = _clip(t, 10**6)
     if len(t) <= n:
         return t
-    tail = max(120, n // 3)
+    tail = min(n // 2, max(120, n // 3))
     return t[:n - tail] + " … " + t[-tail:]
 
 
@@ -701,7 +701,7 @@ def write_digest(state: dict) -> pathlib.Path:
         rec = state[rid]
         bots = [e for e in rec["transcript"] if e["role"] == "bot"]
         best = max((e.get("text") or "" for e in bots), key=len, default="")
-        out.append(f"- {rid} · expected {rec.get('expected_behavior') or '—'} · "
+        out.append(f"- {rid} · expected {_clip(rec.get('expected_behavior'), 160) or '—'} · "
                    f"{classify_thread(rec)[0]} · {len(bots)} turns · {_clip(best, 200)}")
     path = OUT / "digest.md"
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
